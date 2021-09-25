@@ -44,19 +44,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin_hashes"
-version = "0.10.0"
+name = "bitcoin-explorer"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "006cc91e1a1d99819bc5b8214be3555c1f0611b169f527a1fdc54ed1f2b745b0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bitcoinquery"
-version = "0.1.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5582037ac86899aae8e0525389f7249ccffc678361f5230de2036c7fa4c970a"
+checksum = "a11f52d4453ef65dc3a0735fbdcf96e10d683cf145b2d9037ef21a99db5e5587"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -74,6 +65,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin_hashes"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "006cc91e1a1d99819bc5b8214be3555c1f0611b169f527a1fdc54ed1f2b745b0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -84,7 +84,7 @@ name = "btc_analyzer"
 version = "0.1.1"
 dependencies = [
  "bitcoin",
- "bitcoinquery",
+ "bitcoin-explorer",
  "chrono",
  "indicatif",
  "log",

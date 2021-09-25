@@ -1,6 +1,6 @@
 use bitcoin::Address;
-use bitcoinquery::api::BitcoinDB;
-use bitcoinquery::bitcoinparser::proto::connected_proto::SConnectedBlock;
+use bitcoin_explorer::api::BitcoinDB;
+use bitcoin_explorer::bitcoinparser::proto::connected_proto::SConnectedBlock;
 use chrono::{Date, NaiveDateTime, Utc};
 use indicatif;
 use indicatif::ProgressStyle;
@@ -75,10 +75,10 @@ impl AddressCache {
     fn addresses_to_string(addresses: Vec<Address>) -> Option<String> {
         match addresses.len() {
             0 => None,
-            1 => Some(addresses.get(0).unwrap().to_qr_uri()),
+            1 => Some(addresses.get(0).unwrap().to_string()),
             _ => {
                 let mut addresses: Vec<String> =
-                    addresses.into_iter().map(|a| a.to_qr_uri()).collect();
+                    addresses.into_iter().map(|a| a.to_string()).collect();
                 // sort addresses
                 addresses.sort();
                 Some(addresses.join("-"))
