@@ -1,6 +1,6 @@
 use bitcoin::Address;
 use bitcoin_explorer::api::BitcoinDB;
-use bitcoin_explorer::bitcoinparser::proto::connected_proto::SConnectedBlock;
+use bitcoin_explorer::parser::proto::connected_proto::SConnectedBlock;
 use chrono::{Date, NaiveDateTime, Utc};
 use indicatif;
 use indicatif::ProgressStyle;
