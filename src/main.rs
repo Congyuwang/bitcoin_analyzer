@@ -1,6 +1,4 @@
-use bitcoin::Address;
-use bitcoin_explorer::api::BitcoinDB;
-use bitcoin_explorer::parser::proto::connected_proto::SConnectedBlock;
+use bitcoin_explorer::api::{BitcoinDB, Address, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
 use indicatif;
 use indicatif::ProgressStyle;
@@ -165,7 +163,7 @@ fn main() {
 
     // preparing progress bar
     let total_number_of_transactions = (0..end)
-        .map(|i| db.get_block_header(i).unwrap().n_tx)
+        .map(|i| db.get_header(i).unwrap().n_tx)
         .sum::<u32>() as u64;
     let bar = indicatif::ProgressBar::new(total_number_of_transactions);
     bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
@@ -188,7 +186,7 @@ fn main() {
         let mut bal_change: BTreeMap<usize, i64> = BTreeMap::new();
         let mut prev_date: Option<Date<Utc>> = None;
 
-        for blk in db.get_block_simple_connected_iter(end as u32) {
+        for blk in db.iter_block_simple_connected(end as u32) {
             let datetime = NaiveDateTime::from_timestamp(blk.header.time as i64, 0);
             let date = Date::from_utc(datetime.date(), Utc);
             if let Some(prev_date) = prev_date {
