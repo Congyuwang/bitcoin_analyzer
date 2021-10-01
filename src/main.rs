@@ -186,7 +186,7 @@ fn main() {
         let mut bal_change: BTreeMap<usize, i64> = BTreeMap::new();
         let mut prev_date: Option<Date<Utc>> = None;
 
-        for blk in db.iter_block_simple_connected(end as u32) {
+        for blk in db.iter_connected_block::<SConnectedBlock>(end as u32) {
             let datetime = NaiveDateTime::from_timestamp(blk.header.time as i64, 0);
             let date = Date::from_utc(datetime.date(), Utc);
             if let Some(prev_date) = prev_date {
