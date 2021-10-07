@@ -10,14 +10,52 @@ use std::fs;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{BufWriter, Write};
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::mpsc;
+use std::sync::mpsc::SyncSender;
 use std::thread;
+use std::thread::JoinHandle;
 use hash_hasher::HashedMap;
+
+struct AsyncBufWriter<W: Write> {
+    worker: Option<JoinHandle<()>>,
+    sender: SyncSender<Box<[u8]>>,
+    p: PhantomData<W>,
+}
+
+impl<W: 'static + Write + Send> AsyncBufWriter<W> {
+
+    fn new(mut writer: W) -> AsyncBufWriter<W> {
+        let (sender, receiver) = mpsc::sync_channel::<Box<[u8]>>(1000);
+        let worker = thread::spawn(move || {
+            for line in receiver.into_iter() {
+                writer.write_all(&line).unwrap();
+            }
+            writer.flush().unwrap();
+        });
+        AsyncBufWriter {
+            worker: Some(worker),
+            sender,
+            p: PhantomData::default(),
+        }
+    }
+
+    fn write_all(&self, buf: Box<[u8]>) {
+        self.sender.send(buf).unwrap();
+    }
+
+}
+
+impl<W: Write> Drop for AsyncBufWriter<W> {
+    fn drop(&mut self) {
+        self.worker.take().unwrap().join().unwrap()
+    }
+}
 
 struct AddressCache {
     address_index: HashedMap<u128, usize>,
-    permanent_store: BufWriter<File>,
+    permanent_store: AsyncBufWriter<File>,
 }
 
 impl AddressCache {
@@ -26,10 +64,10 @@ impl AddressCache {
         let file_name = "addresses.csv";
         let mut out_file = out_dir.to_path_buf();
         out_file.extend(Path::new(&file_name));
-        let mut permanent_store = BufWriter::new(File::create(out_file).unwrap());
+        let out_file = File::create(out_file).unwrap();
+        let permanent_store = AsyncBufWriter::new(out_file);
         permanent_store
-            .write("address_number,address\n".as_bytes())
-            .unwrap();
+            .write_all("address_number,address\n".to_owned().into_boxed_str().into_boxed_bytes());
         AddressCache {
             address_index: HashedMap::default(),
             permanent_store,
@@ -54,7 +92,7 @@ impl AddressCache {
             if !self.contains_address(&address_hash) {
                 let new_index = self.address_index.len();
                 let line = (new_index.to_string() + "," + &addresses_string + "\n").into_bytes();
-                self.permanent_store.write(&line).unwrap();
+                self.permanent_store.write_all(line.into_boxed_slice());
                 self.address_index.insert(address_hash, new_index);
                 Some(new_index)
             } else {
@@ -90,12 +128,6 @@ impl AddressCache {
         let mut hasher = SipHasher13::new();
         address_string.hash(&mut hasher);
         hasher.finish128().as_u128()
-    }
-}
-
-impl Drop for AddressCache {
-    fn drop(&mut self) {
-        self.permanent_store.flush().unwrap()
     }
 }
 
