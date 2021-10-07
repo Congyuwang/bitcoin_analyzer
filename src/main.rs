@@ -1,22 +1,23 @@
-use std::collections::BTreeMap;
-use bitcoin_explorer::{BitcoinDB, Address, SConnectedBlock};
+use bitcoin_explorer::{Address, BitcoinDB, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
+use hash_hasher::HashedMap;
 use indicatif;
 use indicatif::ProgressStyle;
 use log::info;
+use rayon::prelude::*;
 use simple_logger::SimpleLogger;
 use siphasher::sip128::{Hasher128, SipHasher13};
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use hash_hasher::HashedMap;
 
 struct AsyncBufWriter<W: Write> {
     worker: Option<JoinHandle<()>>,
@@ -25,7 +26,6 @@ struct AsyncBufWriter<W: Write> {
 }
 
 impl<W: 'static + Write + Send> AsyncBufWriter<W> {
-
     fn new(mut writer: W) -> AsyncBufWriter<W> {
         let (sender, receiver) = mpsc::sync_channel::<Box<[u8]>>(1000);
         let worker = thread::spawn(move || {
@@ -44,7 +44,6 @@ impl<W: 'static + Write + Send> AsyncBufWriter<W> {
     fn write_all(&self, buf: Box<[u8]>) {
         self.sender.send(buf).unwrap();
     }
-
 }
 
 impl<W: Write> Drop for AsyncBufWriter<W> {
@@ -54,48 +53,50 @@ impl<W: Write> Drop for AsyncBufWriter<W> {
 }
 
 struct AddressCache {
-    address_index: HashedMap<u128, usize>,
-    permanent_store: AsyncBufWriter<File>,
+    address_index: Arc<Mutex<HashedMap<u128, usize>>>,
+    permanent_store: Arc<Mutex<AsyncBufWriter<File>>>,
 }
 
 impl AddressCache {
-
     pub fn new(out_dir: &Path) -> AddressCache {
         let file_name = "addresses.csv";
         let mut out_file = out_dir.to_path_buf();
         out_file.extend(Path::new(&file_name));
         let out_file = File::create(out_file).unwrap();
-        let permanent_store = AsyncBufWriter::new(out_file);
-        permanent_store
-            .write_all("address_number,address\n".to_owned().into_boxed_str().into_boxed_bytes());
+        let permanent_store = Arc::new(Mutex::new(AsyncBufWriter::new(out_file)));
+        permanent_store.lock().unwrap().write_all(
+            "address_number,address\n"
+                .to_owned()
+                .into_boxed_str()
+                .into_boxed_bytes(),
+        );
         AddressCache {
-            address_index: HashedMap::default(),
+            address_index: Arc::new(Mutex::new(HashedMap::default())),
             permanent_store,
         }
     }
 
-    pub fn get_address_hash(&self, addresses: Box<[Address]>) -> Option<u128> {
-        if let Some(addresses) = Self::addresses_to_string(addresses) {
-            Some(Self::hash(&addresses))
-        } else {
-            None
-        }
-    }
-
-    pub fn get_address_index(&self, hash: u128) -> Option<usize> {
-        self.address_index.get(&hash).map(|x| x.to_owned())
-    }
-
-    pub fn try_get_or_add_address_index(&mut self, addresses: Box<[Address]>) -> Option<usize> {
+    #[inline]
+    pub fn try_get_or_add_address_index(&self, addresses: Box<[Address]>) -> Option<usize> {
         if let Some(addresses_string) = Self::addresses_to_string(addresses) {
             let address_hash = Self::hash(&addresses_string);
             if !self.contains_address(&address_hash) {
-                let new_index = self.address_index.len();
+                // sync
+                let new_index = self.address_index.lock().unwrap().len();
                 let line = (new_index.to_string() + "," + &addresses_string + "\n").into_bytes();
-                self.permanent_store.write_all(line.into_boxed_slice());
-                self.address_index.insert(address_hash, new_index);
+                // sync
+                self.permanent_store
+                    .lock()
+                    .unwrap()
+                    .write_all(line.into_boxed_slice());
+                // sync
+                self.address_index
+                    .lock()
+                    .unwrap()
+                    .insert(address_hash, new_index);
                 Some(new_index)
             } else {
+                // sync
                 self.get_address_index(address_hash)
             }
         } else {
@@ -104,8 +105,28 @@ impl AddressCache {
     }
 
     #[inline]
+    pub fn get_address_hash(&self, addresses: Box<[Address]>) -> Option<u128> {
+        if let Some(addresses) = Self::addresses_to_string(addresses) {
+            Some(Self::hash(&addresses))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn get_address_index(&self, hash: u128) -> Option<usize> {
+        // sync
+        self.address_index
+            .lock()
+            .unwrap()
+            .get(&hash)
+            .map(|x| x.to_owned())
+    }
+
+    #[inline]
     fn contains_address(&self, hash: &u128) -> bool {
-        self.address_index.contains_key(hash)
+        // sync
+        self.address_index.lock().unwrap().contains_key(hash)
     }
 
     #[inline]
@@ -137,34 +158,42 @@ impl AddressCache {
 ///
 fn update_balance(
     block: SConnectedBlock,
-    balance: &mut BTreeMap<usize, i64>,
+    balance: &Arc<Mutex<BTreeMap<usize, i64>>>,
     cache: &mut AddressCache,
 ) {
+    let count_in: usize = block.txdata.iter().map(|tx| tx.input.len()).sum();
+    let count_out: usize = block.txdata.iter().map(|tx| tx.output.len()).sum();
+    let mut ins = Vec::with_capacity(count_in);
+    let mut outs = Vec::with_capacity(count_out);
     for tx in block.txdata {
-        for tx_in in tx.input {
-            // skip those without addresses
-            if let Some(address_hash) = cache.get_address_hash(tx_in.addresses) {
-                let address_number = cache
-                    .get_address_index(address_hash)
-                    .expect("new addresses only appear in tx_out");
-                if !balance.contains_key(&address_number) {
-                    balance.insert(address_number, -(tx_in.value as i64));
-                } else {
-                    *balance.get_mut(&address_number).unwrap() -= tx_in.value as i64;
-                }
-            }
-        }
-        for tx_out in tx.output {
-            // skip those without addresses
-            if let Some(address_number) = cache.try_get_or_add_address_index(tx_out.addresses) {
-                if !balance.contains_key(&address_number) {
-                    balance.insert(address_number, tx_out.value as i64);
-                } else {
-                    *balance.get_mut(&address_number).unwrap() += tx_out.value as i64;
-                }
-            }
-        }
+        ins.extend(tx.input);
+        outs.extend(tx.output);
     }
+    outs.into_par_iter().for_each(|tx_out| {
+        // skip those without addresses
+        if let Some(address_number) = cache.try_get_or_add_address_index(tx_out.addresses) {
+            let mut balance = balance.lock().unwrap();
+            if !balance.contains_key(&address_number) {
+                balance.insert(address_number, tx_out.value as i64);
+            } else {
+                *balance.get_mut(&address_number).unwrap() += tx_out.value as i64;
+            }
+        }
+    });
+    ins.into_par_iter().for_each(|tx_in| {
+        // skip those without addresses
+        if let Some(address_hash) = cache.get_address_hash(tx_in.addresses) {
+            let address_number = cache
+                .get_address_index(address_hash)
+                .expect("new addresses only appear in tx_out");
+            let mut balance = balance.lock().unwrap();
+            if !balance.contains_key(&address_number) {
+                balance.insert(address_number, -(tx_in.value as i64));
+            } else {
+                *balance.get_mut(&address_number).unwrap() -= tx_in.value as i64;
+            }
+        }
+    });
 }
 
 fn write_balance(balance: &BTreeMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
@@ -203,12 +232,13 @@ fn main() {
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
 
-    let (sender, receiver) = mpsc::sync_channel::<(BTreeMap<usize, i64>, Date<Utc>)>(10);
+    let (sender, receiver) =
+        mpsc::sync_channel::<(Arc<Mutex<BTreeMap<usize, i64>>>, Date<Utc>)>(10);
 
     // start writer thread
     let writer = thread::spawn(move || {
         for (balance, date) in receiver.into_iter() {
-            write_balance(&balance, out_dir, date);
+            write_balance(&balance.lock().unwrap(), out_dir, date);
         }
     });
 
@@ -216,7 +246,8 @@ fn main() {
     let producer = thread::spawn(move || {
         // initialize
         let mut address_cache = AddressCache::new(out_dir);
-        let mut bal_change: BTreeMap<usize, i64> = BTreeMap::new();
+        let mut bal_change: Arc<Mutex<BTreeMap<usize, i64>>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
         let mut prev_date: Option<Date<Utc>> = None;
 
         for blk in db.iter_connected_block::<SConnectedBlock>(end as u32) {
@@ -224,15 +255,13 @@ fn main() {
             let date = Date::from_utc(datetime.date(), Utc);
             if let Some(prev_date) = prev_date {
                 if date > prev_date {
-                    sender
-                        .send((bal_change.clone(), prev_date.clone()))
-                        .unwrap();
-                    bal_change = BTreeMap::new();
+                    sender.send((bal_change, prev_date.clone())).unwrap();
+                    bal_change = Arc::new(Mutex::new(BTreeMap::new()));
                 }
             }
             prev_date = Some(date);
             let len = blk.txdata.len();
-            update_balance(blk, &mut bal_change, &mut address_cache);
+            update_balance(blk, &bal_change, &mut address_cache);
             bar.inc(len as u64)
         }
         bar.finish();

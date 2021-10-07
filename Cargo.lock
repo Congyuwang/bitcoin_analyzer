@@ -74,6 +74,7 @@ dependencies = [
  "hash_hasher",
  "indicatif",
  "log",
+ "rayon",
  "simple_logger",
  "siphasher",
 ]
