@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use bitcoin_explorer::{BitcoinDB, Address, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
 use indicatif;
@@ -5,7 +6,6 @@ use indicatif::ProgressStyle;
 use log::info;
 use simple_logger::SimpleLogger;
 use siphasher::sip128::{Hasher128, SipHasher13};
-use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
@@ -13,9 +13,10 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
+use hash_hasher::HashedMap;
 
 struct AddressCache {
-    address_index: HashMap<u128, usize>,
+    address_index: HashedMap<u128, usize>,
     permanent_store: BufWriter<File>,
 }
 
@@ -30,12 +31,12 @@ impl AddressCache {
             .write("address_number,address\n".as_bytes())
             .unwrap();
         AddressCache {
-            address_index: HashMap::new(),
+            address_index: HashedMap::default(),
             permanent_store,
         }
     }
 
-    pub fn get_address_hash(&self, addresses: Vec<Address>) -> Option<u128> {
+    pub fn get_address_hash(&self, addresses: Box<[Address]>) -> Option<u128> {
         if let Some(addresses) = Self::addresses_to_string(addresses) {
             Some(Self::hash(&addresses))
         } else {
@@ -47,7 +48,7 @@ impl AddressCache {
         self.address_index.get(&hash).map(|x| x.to_owned())
     }
 
-    pub fn try_get_or_add_address_index(&mut self, addresses: Vec<Address>) -> Option<usize> {
+    pub fn try_get_or_add_address_index(&mut self, addresses: Box<[Address]>) -> Option<usize> {
         if let Some(addresses_string) = Self::addresses_to_string(addresses) {
             let address_hash = Self::hash(&addresses_string);
             if !self.contains_address(&address_hash) {
@@ -70,7 +71,7 @@ impl AddressCache {
     }
 
     #[inline]
-    fn addresses_to_string(addresses: Vec<Address>) -> Option<String> {
+    fn addresses_to_string(addresses: Box<[Address]>) -> Option<String> {
         match addresses.len() {
             0 => None,
             1 => Some(addresses.get(0).unwrap().to_string()),
@@ -104,7 +105,7 @@ impl Drop for AddressCache {
 ///
 fn update_balance(
     block: SConnectedBlock,
-    balance: &mut HashMap<usize, i64>,
+    balance: &mut BTreeMap<usize, i64>,
     cache: &mut AddressCache,
 ) {
     for tx in block.txdata {
@@ -134,7 +135,7 @@ fn update_balance(
     }
 }
 
-fn write_balance(balance: &HashMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
+fn write_balance(balance: &BTreeMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
     let file_name = date.format("%Y-%m-%d").to_string() + ".csv";
     let mut out_file = out_dir.to_path_buf();
     out_file.extend(Path::new(&file_name));
@@ -155,7 +156,7 @@ fn main() {
     SimpleLogger::new().init().unwrap();
     let end = 700000;
     let db = BitcoinDB::new(Path::new("/116020237/bitcoin"), false).unwrap();
-    let out_dir = Path::new("./out/balances/");
+    let out_dir = Path::new("/out/balances/");
     if !out_dir.exists() {
         fs::create_dir_all(out_dir).unwrap();
     }
@@ -170,7 +171,7 @@ fn main() {
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
 
-    let (sender, receiver) = mpsc::sync_channel::<(HashMap<usize, i64>, Date<Utc>)>(10);
+    let (sender, receiver) = mpsc::sync_channel::<(BTreeMap<usize, i64>, Date<Utc>)>(10);
 
     // start writer thread
     let writer = thread::spawn(move || {
@@ -183,7 +184,7 @@ fn main() {
     let producer = thread::spawn(move || {
         // initialize
         let mut address_cache = AddressCache::new(out_dir);
-        let mut bal_change: HashMap<usize, i64> = HashMap::new();
+        let mut bal_change: BTreeMap<usize, i64> = BTreeMap::new();
         let mut prev_date: Option<Date<Utc>> = None;
 
         for blk in db.iter_connected_block::<SConnectedBlock>(end as u32) {
@@ -194,7 +195,7 @@ fn main() {
                     sender
                         .send((bal_change.clone(), prev_date.clone()))
                         .unwrap();
-                    bal_change = HashMap::new();
+                    bal_change = BTreeMap::new();
                 }
             }
             prev_date = Some(date);
