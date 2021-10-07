@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use bitcoin_explorer::{BitcoinDB, Address, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
 use indicatif;
@@ -17,6 +16,7 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::thread::JoinHandle;
 use hash_hasher::HashedMap;
+use rustc_hash::FxHashMap;
 
 struct AsyncBufWriter<W: Write> {
     worker: Option<JoinHandle<()>>,
@@ -137,7 +137,7 @@ impl AddressCache {
 ///
 fn update_balance(
     block: SConnectedBlock,
-    balance: &mut BTreeMap<usize, i64>,
+    balance: &mut FxHashMap<usize, i64>,
     cache: &mut AddressCache,
 ) {
     for tx in block.txdata {
@@ -167,7 +167,7 @@ fn update_balance(
     }
 }
 
-fn write_balance(balance: &BTreeMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
+fn write_balance(balance: &FxHashMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
     let file_name = date.format("%Y-%m-%d").to_string() + ".csv";
     let mut out_file = out_dir.to_path_buf();
     out_file.extend(Path::new(&file_name));
@@ -203,7 +203,7 @@ fn main() {
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
 
-    let (sender, receiver) = mpsc::sync_channel::<(BTreeMap<usize, i64>, Date<Utc>)>(10);
+    let (sender, receiver) = mpsc::sync_channel::<(FxHashMap<usize, i64>, Date<Utc>)>(10);
 
     // start writer thread
     let writer = thread::spawn(move || {
@@ -216,7 +216,7 @@ fn main() {
     let producer = thread::spawn(move || {
         // initialize
         let mut address_cache = AddressCache::new(out_dir);
-        let mut bal_change: BTreeMap<usize, i64> = BTreeMap::new();
+        let mut bal_change: FxHashMap<usize, i64> = FxHashMap::default();
         let mut prev_date: Option<Date<Utc>> = None;
 
         for blk in db.iter_connected_block::<SConnectedBlock>(end as u32) {
@@ -227,7 +227,7 @@ fn main() {
                     sender
                         .send((bal_change.clone(), prev_date.clone()))
                         .unwrap();
-                    bal_change = BTreeMap::new();
+                    bal_change = FxHashMap::default();
                 }
             }
             prev_date = Some(date);
