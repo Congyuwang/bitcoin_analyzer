@@ -1,13 +1,14 @@
 use bitcoin_explorer::{Address, BitcoinDB, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
-use hash_hasher::HashedMap;
+use hash_hasher::{HashBuildHasher, HashedMap};
 use indicatif;
 use indicatif::ProgressStyle;
 use log::info;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use simple_logger::SimpleLogger;
 use siphasher::sip128::{Hasher128, SipHasher13};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
@@ -71,7 +72,10 @@ impl AddressCache {
                 .into_boxed_bytes(),
         );
         AddressCache {
-            address_index: Arc::new(Mutex::new(HashMap::default())),
+            address_index: Arc::new(Mutex::new(HashMap::with_capacity_and_hasher(
+                1 << 30 - 1,
+                HashBuildHasher::default(),
+            ))),
             permanent_store,
         }
     }
@@ -151,11 +155,11 @@ impl AddressCache {
 ///
 fn update_balance(
     block: SConnectedBlock,
-    balance: &Arc<Mutex<BTreeMap<usize, i64>>>,
+    balance: &Arc<Mutex<FxHashMap<usize, i64>>>,
     cache: &mut AddressCache,
 ) {
-    let count_in: usize = block.txdata.iter().map(|tx| tx.input.len()).sum();
-    let count_out: usize = block.txdata.iter().map(|tx| tx.output.len()).sum();
+    let count_in: usize = block.txdata.par_iter().map(|tx| tx.input.len()).sum();
+    let count_out: usize = block.txdata.par_iter().map(|tx| tx.output.len()).sum();
     let mut ins = Vec::with_capacity(count_in);
     let mut outs = Vec::with_capacity(count_out);
     for tx in block.txdata {
@@ -181,7 +185,7 @@ fn update_balance(
     });
 }
 
-fn write_balance(balance: &BTreeMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
+fn write_balance(balance: &FxHashMap<usize, i64>, out_dir: &Path, date: Date<Utc>) {
     let file_name = date.format("%Y-%m-%d").to_string() + ".csv";
     let mut out_file = out_dir.to_path_buf();
     out_file.extend(Path::new(&file_name));
@@ -217,7 +221,7 @@ fn main() {
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
 
-    let (sender, receiver) = mpsc::channel::<(Arc<Mutex<BTreeMap<usize, i64>>>, Date<Utc>)>();
+    let (sender, receiver) = mpsc::channel::<(Arc<Mutex<FxHashMap<usize, i64>>>, Date<Utc>)>();
 
     // start writer thread
     let writer = thread::spawn(move || {
@@ -230,8 +234,8 @@ fn main() {
     let producer = thread::spawn(move || {
         // initialize
         let mut address_cache = AddressCache::new(out_dir);
-        let mut bal_change: Arc<Mutex<BTreeMap<usize, i64>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
+        let mut bal_change: Arc<Mutex<FxHashMap<usize, i64>>> =
+            Arc::new(Mutex::new(FxHashMap::default()));
         let mut prev_date: Option<Date<Utc>> = None;
 
         for blk in db.iter_connected_block::<SConnectedBlock>(end as u32) {
@@ -240,7 +244,7 @@ fn main() {
             if let Some(prev_date) = prev_date {
                 if date > prev_date {
                     sender.send((bal_change, prev_date.clone())).unwrap();
-                    bal_change = Arc::new(Mutex::new(BTreeMap::new()));
+                    bal_change = Arc::new(Mutex::new(FxHashMap::default()));
                 }
             }
             prev_date = Some(date);
