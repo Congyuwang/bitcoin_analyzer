@@ -7,11 +7,11 @@ use log::info;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use simple_logger::SimpleLogger;
-use siphasher::sip128::{Hasher128, SipHasher13};
+use ahash::AHasher;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::path::Path;
@@ -54,7 +54,7 @@ impl<W: Write> Drop for AsyncBufWriter<W> {
 }
 
 struct AddressCache {
-    address_index: Arc<Mutex<HashedMap<[u8; 16], usize>>>,
+    address_index: Arc<Mutex<HashedMap<u128, usize>>>,
     permanent_store: Arc<Mutex<AsyncBufWriter<File>>>,
 }
 
@@ -73,7 +73,7 @@ impl AddressCache {
         );
         AddressCache {
             address_index: Arc::new(Mutex::new(HashMap::with_capacity_and_hasher(
-                1 << 30 - 1,
+                (1 << 30) - 1,
                 HashBuildHasher::default(),
             ))),
             permanent_store,
@@ -108,7 +108,7 @@ impl AddressCache {
     }
 
     #[inline]
-    pub fn get_address_hash(&self, addresses: Box<[Address]>) -> Option<[u8; 16]> {
+    pub fn get_address_hash(&self, addresses: Box<[Address]>) -> Option<u128> {
         if let Some(addresses) = Self::addresses_to_string(addresses) {
             Some(Self::hash(&addresses))
         } else {
@@ -117,7 +117,7 @@ impl AddressCache {
     }
 
     #[inline]
-    pub fn get_address_index(&self, hash: [u8; 16]) -> Option<usize> {
+    pub fn get_address_index(&self, hash: u128) -> Option<usize> {
         // sync
         self.address_index
             .lock()
@@ -142,10 +142,14 @@ impl AddressCache {
     }
 
     #[inline]
-    fn hash(address_string: &str) -> [u8; 16] {
-        let mut hasher = SipHasher13::new();
-        address_string.hash(&mut hasher);
-        hasher.finish128().as_bytes()
+    fn hash(address_string: &str) -> u128 {
+        let mut hasher_0 = AHasher::new_with_keys(54321, 12345);
+        let mut hasher_1 = AHasher::new_with_keys(12345, 54321);
+        address_string.hash(&mut hasher_0);
+        address_string.hash(&mut hasher_1);
+        let hash_0 = (hasher_0.finish() as u128) << 64;
+        let hash_1 = hasher_1.finish() as u128;
+        hash_0 ^ hash_1
     }
 }
 
