@@ -72,10 +72,7 @@ impl AddressCache {
                 .into_boxed_bytes(),
         );
         AddressCache {
-            address_index: Arc::new(Mutex::new(HashMap::with_capacity_and_hasher(
-                (1 << 30) - 1,
-                HashBuildHasher::default(),
-            ))),
+            address_index: Arc::new(Mutex::new(HashedMap::default())),
             permanent_store,
         }
     }
@@ -162,10 +159,8 @@ fn update_balance(
     balance: &Arc<Mutex<FxHashMap<usize, i64>>>,
     cache: &mut AddressCache,
 ) {
-    let count_in: usize = block.txdata.par_iter().map(|tx| tx.input.len()).sum();
-    let count_out: usize = block.txdata.par_iter().map(|tx| tx.output.len()).sum();
-    let mut ins = Vec::with_capacity(count_in);
-    let mut outs = Vec::with_capacity(count_out);
+    let mut ins = Vec::new();
+    let mut outs = Vec::new();
     for tx in block.txdata {
         ins.extend(tx.input);
         outs.extend(tx.output);
