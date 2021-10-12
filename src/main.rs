@@ -201,8 +201,8 @@ fn write_balance(balance: &FxHashMap<usize, i64>, out_dir: &Path, date: Date<Utc
 
 fn main() {
     SimpleLogger::new().init().unwrap();
-    let end = 700000;
     let db = BitcoinDB::new(Path::new("/116020237/bitcoin"), false).unwrap();
+    let end = db.get_max_height();
     let out_dir = Path::new("./out/balances/");
     if !out_dir.exists() {
         fs::create_dir_all(out_dir).unwrap();
