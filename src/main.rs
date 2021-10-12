@@ -1,6 +1,6 @@
 use bitcoin_explorer::{Address, BitcoinDB, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
-use hash_hasher::{HashBuildHasher, HashedMap};
+use hash_hasher::HashedMap;
 use indicatif;
 use indicatif::ProgressStyle;
 use log::info;
@@ -8,26 +8,24 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use simple_logger::SimpleLogger;
 use ahash::AHasher;
-use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
-use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
-struct AsyncBufWriter<W: Write> {
-    worker: Option<JoinHandle<()>>,
+#[derive(Clone)]
+struct AsyncBufWriter {
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
     sender: Sender<Box<[u8]>>,
-    p: PhantomData<W>,
 }
 
-impl<W: 'static + Write + Send> AsyncBufWriter<W> {
-    fn new(mut writer: W) -> AsyncBufWriter<W> {
+impl AsyncBufWriter {
+    fn new(mut writer: File) -> AsyncBufWriter {
         let (sender, receiver) = mpsc::channel::<Box<[u8]>>();
         let worker = thread::spawn(move || {
             for line in receiver.into_iter() {
@@ -36,9 +34,8 @@ impl<W: 'static + Write + Send> AsyncBufWriter<W> {
             writer.flush().unwrap();
         });
         AsyncBufWriter {
-            worker: Some(worker),
+            worker: Arc::new(Mutex::new(Some(worker))),
             sender,
-            p: PhantomData::default(),
         }
     }
 
@@ -47,15 +44,18 @@ impl<W: 'static + Write + Send> AsyncBufWriter<W> {
     }
 }
 
-impl<W: Write> Drop for AsyncBufWriter<W> {
+impl Drop for AsyncBufWriter {
     fn drop(&mut self) {
-        self.worker.take().unwrap().join().unwrap()
+        if let Some(handle) = self.worker.lock().unwrap().take() {
+            handle.join().unwrap();
+        }
     }
 }
 
+#[derive(Clone)]
 struct AddressCache {
     address_index: Arc<Mutex<HashedMap<u128, usize>>>,
-    permanent_store: Arc<Mutex<AsyncBufWriter<File>>>,
+    permanent_store: AsyncBufWriter,
 }
 
 impl AddressCache {
@@ -64,8 +64,8 @@ impl AddressCache {
         let mut out_file = out_dir.to_path_buf();
         out_file.extend(Path::new(&file_name));
         let out_file = File::create(out_file).unwrap();
-        let permanent_store = Arc::new(Mutex::new(AsyncBufWriter::new(out_file)));
-        permanent_store.lock().unwrap().write_all(
+        let permanent_store = AsyncBufWriter::new(out_file);
+        permanent_store.write_all(
             "address_number,address\n"
                 .to_owned()
                 .into_boxed_str()
@@ -93,10 +93,7 @@ impl AddressCache {
             if is_new_address {
                 let line = (index.to_string() + "," + &addresses_string + "\n").into_bytes();
                 // sync
-                self.permanent_store
-                    .lock()
-                    .unwrap()
-                    .write_all(line.into_boxed_slice());
+                self.permanent_store.write_all(line.into_boxed_slice());
             }
             Some(index)
         } else {
@@ -157,7 +154,7 @@ impl AddressCache {
 fn update_balance(
     block: SConnectedBlock,
     balance: &Arc<Mutex<FxHashMap<usize, i64>>>,
-    cache: &mut AddressCache,
+    cache: AddressCache,
 ) {
     let mut ins = Vec::new();
     let mut outs = Vec::new();
@@ -165,14 +162,14 @@ fn update_balance(
         ins.extend(tx.input);
         outs.extend(tx.output);
     }
-    outs.into_par_iter().for_each(|tx_out| {
+    outs.into_par_iter().for_each_with(cache.clone(), |cache, tx_out| {
         // skip those without addresses
         if let Some(address_number) = cache.try_get_or_add_address_index(tx_out.addresses) {
             let mut balance = balance.lock().unwrap();
             *balance.entry(address_number).or_insert(0) += tx_out.value as i64;
         }
     });
-    ins.into_par_iter().for_each(|tx_in| {
+    ins.into_par_iter().for_each_with(cache, |cache, tx_in| {
         // skip those without addresses
         if let Some(address_hash) = cache.get_address_hash(tx_in.addresses) {
             let address_number = cache
@@ -232,7 +229,7 @@ fn main() {
     // producer thread
     let producer = thread::spawn(move || {
         // initialize
-        let mut address_cache = AddressCache::new(out_dir);
+        let address_cache = AddressCache::new(out_dir);
         let mut bal_change: Arc<Mutex<FxHashMap<usize, i64>>> =
             Arc::new(Mutex::new(FxHashMap::default()));
         let mut prev_date: Option<Date<Utc>> = None;
@@ -248,7 +245,7 @@ fn main() {
             }
             prev_date = Some(date);
             let len = blk.txdata.len();
-            update_balance(blk, &bal_change, &mut address_cache);
+            update_balance(blk, &bal_change, address_cache.clone());
             bar.inc(len as u64)
         }
         bar.finish();
