@@ -42,10 +42,8 @@ impl AsyncBufWriter {
     fn write_all(&self, buf: Box<[u8]>) {
         self.sender.send(buf).unwrap();
     }
-}
 
-impl Drop for AsyncBufWriter {
-    fn drop(&mut self) {
+    fn join(&mut self) {
         if let Some(handle) = self.worker.lock().unwrap().take() {
             handle.join().unwrap();
         }
@@ -145,6 +143,10 @@ impl AddressCache {
         let hash_1 = hasher_1.finish() as u128;
         hash_0 ^ hash_1
     }
+
+    fn join(&mut self) {
+        self.permanent_store.join();
+    }
 }
 
 ///
@@ -229,7 +231,7 @@ fn main() {
     // producer thread
     let producer = thread::spawn(move || {
         // initialize
-        let address_cache = AddressCache::new(out_dir);
+        let mut address_cache = AddressCache::new(out_dir);
         let mut bal_change: Arc<Mutex<FxHashMap<usize, i64>>> =
             Arc::new(Mutex::new(FxHashMap::default()));
         let mut prev_date: Option<Date<Utc>> = None;
@@ -248,6 +250,7 @@ fn main() {
             update_balance(blk, &bal_change, address_cache.clone());
             bar.inc(len as u64)
         }
+        address_cache.join();
         bar.finish();
         println!("job finished");
     });
