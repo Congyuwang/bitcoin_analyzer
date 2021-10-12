@@ -43,10 +43,9 @@ impl AsyncBufWriter {
         self.sender.send(buf).unwrap();
     }
 
-    fn join(&mut self) {
-        if let Some(handle) = self.worker.lock().unwrap().take() {
-            handle.join().unwrap();
-        }
+    // join the writer thread back to main thread
+    fn pop_handle(&mut self) -> Option<JoinHandle<()>> {
+        self.worker.lock().unwrap().take()
     }
 }
 
@@ -144,8 +143,8 @@ impl AddressCache {
         hash_0 ^ hash_1
     }
 
-    fn join(&mut self) {
-        self.permanent_store.join();
+    fn pop_handle(&mut self) -> Option<JoinHandle<()>> {
+        self.permanent_store.pop_handle()
     }
 }
 
@@ -228,10 +227,13 @@ fn main() {
         }
     });
 
+    let mut address_cache = AddressCache::new(out_dir);
+    let address_writer_handle = address_cache.pop_handle();
+
     // producer thread
     let producer = thread::spawn(move || {
         // initialize
-        let mut address_cache = AddressCache::new(out_dir);
+
         let mut bal_change: Arc<Mutex<FxHashMap<usize, i64>>> =
             Arc::new(Mutex::new(FxHashMap::default()));
         let mut prev_date: Option<Date<Utc>> = None;
@@ -250,11 +252,16 @@ fn main() {
             update_balance(blk, &bal_change, address_cache.clone());
             bar.inc(len as u64)
         }
-        address_cache.join();
         bar.finish();
         println!("job finished");
     });
 
+    // drop producer first
     producer.join().unwrap();
+
+    // address_cache_writer wait for all address_cache to be dropped
+    address_writer_handle.unwrap().join().unwrap();
+
+    // writer thread block on producer senders, wait for senders
     writer.join().unwrap();
 }
