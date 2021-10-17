@@ -99,7 +99,7 @@ impl AddressCache {
     }
 
     #[inline]
-    pub fn get_address_hash(&self, addresses: Box<[Address]>) -> Option<u128> {
+    pub fn address_hash(addresses: Box<[Address]>) -> Option<u128> {
         if let Some(addresses) = Self::addresses_to_string(addresses) {
             Some(Self::hash(&addresses))
         } else {
@@ -172,7 +172,7 @@ fn update_balance(
     });
     ins.into_par_iter().for_each_with(cache, |cache, tx_in| {
         // skip those without addresses
-        if let Some(address_hash) = cache.get_address_hash(tx_in.addresses) {
+        if let Some(address_hash) = AddressCache::address_hash(tx_in.addresses) {
             let address_number = cache
                 .get_address_index(address_hash)
                 .expect("new addresses only appear in tx_out");
@@ -202,7 +202,7 @@ fn write_balance(balance: &FxHashMap<usize, i64>, out_dir: &Path, date: Date<Utc
 fn main() {
     SimpleLogger::new().init().unwrap();
     let db = BitcoinDB::new(Path::new("/116020237/bitcoin"), false).unwrap();
-    let end = db.get_max_height();
+    let end = db.get_block_count();
     let out_dir = Path::new("./out/balances/");
     if !out_dir.exists() {
         fs::create_dir_all(out_dir).unwrap();
@@ -238,7 +238,7 @@ fn main() {
             Arc::new(Mutex::new(FxHashMap::default()));
         let mut prev_date: Option<Date<Utc>> = None;
 
-        for blk in db.iter_connected_block::<SConnectedBlock>(end as u32) {
+        for blk in db.iter_connected_block::<SConnectedBlock>(end) {
             let datetime = NaiveDateTime::from_timestamp(blk.header.time as i64, 0);
             let date = Date::from_utc(datetime.date(), Utc);
             if let Some(prev_date) = prev_date {

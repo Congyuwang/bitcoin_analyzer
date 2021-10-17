@@ -69,13 +69,12 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-explorer"
-version = "1.2.4"
+version = "1.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a1897bc299570c400c1a2c7daceabf8fa95f31eff1f560cf9a64bc3f1e281b4"
+checksum = "c2b3b201cd8b51caa65293b5afdc2d6022b66ca08abdc7861c6ee90921603653"
 dependencies = [
  "ahash",
  "bitcoin",
- "bitcoin_hashes",
  "byteorder",
  "db-key",
  "hash_hasher",
@@ -248,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "daily_balance"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ahash",
  "bitcoin-explorer",
