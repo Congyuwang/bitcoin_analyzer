@@ -134,7 +134,7 @@ impl AddressCache {
     }
 
     fn connected(&self, hash1: u32, hash2: u32) -> bool {
-        self.find(hash1) == self.find(hash2)
+        self.union_find.lock().unwrap().unioned(hash1, hash2)
     }
 
     #[inline]
