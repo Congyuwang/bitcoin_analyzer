@@ -6,7 +6,6 @@ use indicatif;
 use indicatif::ProgressStyle;
 use log::{info, LevelFilter};
 use par_iter_sync::*;
-use rayon::prelude::*;
 use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
 use std::fs;
@@ -129,6 +128,7 @@ impl AddressCacheRead {
         self.address_index.get(&hash).map(|x| x.to_owned())
     }
 
+    #[inline]
     fn dump_union_find(&self, path: &Path) {
         let mut lock_union_find = self.union_find.lock().unwrap();
         let mut file_writer = BufWriter::new(File::create(path).unwrap());
@@ -245,6 +245,9 @@ impl AddressCache {
 }
 
 fn trailing_zero(value: u64) -> u8 {
+    if value == 0 {
+        return 0;
+    }
     let mut value = value;
     let mut count = 0u8;
     while value % 10 == 0 {
@@ -300,26 +303,16 @@ fn main() {
     let address_cache = AddressCacheRead::from_address_cache(address_cache);
     let address_cache_to_dump = address_cache.clone();
 
-    let bar = indicatif::ProgressBar::new(total_number_of_transactions);
-    bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
-        "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
-    ));
-
     // producer thread
     let producer = thread::spawn(move || {
+        let bar = indicatif::ProgressBar::new(total_number_of_transactions);
+        bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
+        ));
         db.iter_connected_block::<SConnectedBlock>(end)
-            .par_bridge()
-            .into_par_iter()
-            .map(move |blk| {
+            .into_par_iter_async(move |blk| {
                 let progress = blk.txdata.len() as u64;
-                // let mut count == 0; // H3
                 for tx in &blk.txdata {
-                    // H3: coinbase tx
-                    // if count == 0 {
-                    //     address_cache.connect_addresses_index(&out_addresses);
-                    // }
-                    // count += 1;
-
                     let in_addresses: Vec<(u32, u32)> = tx
                         .input
                         .iter()
@@ -383,7 +376,7 @@ fn main() {
                         }
                     }
                 }
-                progress
+                Ok(progress)
             })
             .for_each(|p| bar.inc(p));
         bar.finish();
@@ -409,6 +402,7 @@ mod test {
         assert_eq!(trailing_zero(120), 1u8);
         assert_eq!(trailing_zero(99999999990), 1u8);
         assert_eq!(trailing_zero(9000000000000000000), 18u8);
+        assert_eq!(trailing_zero(0), 0u8);
         assert_eq!(trailing_zero(1200), 2u8);
     }
 }

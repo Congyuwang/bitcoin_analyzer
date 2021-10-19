@@ -14,7 +14,6 @@ dependencies = [
  "indicatif",
  "log",
  "par-iter-sync",
- "rayon",
  "simple_logger",
 ]
 
