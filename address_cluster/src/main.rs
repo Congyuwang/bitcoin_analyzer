@@ -191,6 +191,7 @@ impl AddressCache {
                 let line = (index.to_string() + "," + &addresses_string + "\n").into_bytes();
                 // sync
                 self.permanent_store.write_all(line.into_boxed_slice());
+                self.union_find.lock().unwrap().new_key(());
             }
         }
     }
@@ -249,9 +250,14 @@ fn main() {
     }
     info!("launching DB finished");
 
+    // preparing progress bar
+    let total_number_of_transactions = (0..end)
+        .map(|i| db.get_header(i).unwrap().n_tx)
+        .sum::<u32>() as u64;
+
     info!("load all addresses");
     // preparing progress bar
-    let bar = indicatif::ProgressBar::new(900000000);
+    let bar = indicatif::ProgressBar::new(total_number_of_transactions);
     bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
@@ -276,10 +282,6 @@ fn main() {
 
     let address_cache = AddressCacheRead::from_address_cache(address_cache);
 
-    // preparing progress bar
-    let total_number_of_transactions = (0..end)
-        .map(|i| db.get_header(i).unwrap().n_tx)
-        .sum::<u32>() as u64;
     let bar = indicatif::ProgressBar::new(total_number_of_transactions);
     bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
