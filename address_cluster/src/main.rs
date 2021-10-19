@@ -133,6 +133,7 @@ impl AddressCache {
         }
     }
 
+    #[inline]
     fn connected(&self, hash1: u32, hash2: u32) -> bool {
         self.union_find.lock().unwrap().unioned(hash1, hash2)
     }
@@ -226,7 +227,7 @@ fn main() {
         let par_iter = db
             .iter_connected_block::<SConnectedBlock>(end)
             .into_par_iter_sync(move |blk| {
-                // common spending logic
+                // H1: common spending logic
                 for tx in &blk.txdata {
                     let out_addresses: Vec<u32> = tx
                         .output
