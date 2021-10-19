@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "bitcoin-explorer",
+ "byteorder",
  "ena",
  "hash_hasher",
  "indicatif",

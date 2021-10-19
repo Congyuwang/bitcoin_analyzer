@@ -12,12 +12,13 @@ use std::collections::hash_map::Entry;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use byteorder::{LittleEndian, WriteBytesExt};
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 struct UnitKey(u32);
@@ -126,6 +127,22 @@ impl AddressCacheRead {
     fn get_address_index(&self, hash: u128) -> Option<(u32, u32)> {
         // sync
         self.address_index.get(&hash).map(|x| x.to_owned())
+    }
+
+    fn dump_union_find(&self, path: &Path) {
+        let mut lock_union_find = self.union_find.lock().unwrap();
+        let mut file_writer = BufWriter::new(File::create(path).unwrap());
+        let total_keys = lock_union_find.len() as u32;
+        let bar = indicatif::ProgressBar::new(total_keys as u64);
+        bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
+        ));
+        for i in 0u32..total_keys {
+            let root = lock_union_find.find(i).index();
+            file_writer.write_u32::<LittleEndian>(root).unwrap();
+            bar.inc(1);
+        }
+        bar.finish();
     }
 }
 
@@ -281,6 +298,7 @@ fn main() {
     info!("finished loading all addresses");
 
     let address_cache = AddressCacheRead::from_address_cache(address_cache);
+    let address_cache_to_dump = address_cache.clone();
 
     let bar = indicatif::ProgressBar::new(total_number_of_transactions);
     bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
@@ -369,14 +387,18 @@ fn main() {
             })
             .for_each(|p| bar.inc(p));
         bar.finish();
-        println!("job finished");
+        info!("clustering finished");
     });
+
+    info!("start dumping clustering result");
+    address_cache_to_dump.dump_union_find(&out_dir.to_path_buf().join("clustering.u32little"));
 
     // drop producer first
     producer.join().unwrap();
 
     // address_cache_writer wait for all address_cache to be dropped
     address_writer_handle.unwrap().join().unwrap();
+    info!("job finished");
 }
 
 #[cfg(test)]
