@@ -16,7 +16,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use par_iter_sync::IntoParallelIteratorSync;
+use par_iter_sync::*;
 use rayon::prelude::*;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -264,7 +264,7 @@ fn main() {
     // load all addresses
     let address_cache_clone = address_cache.clone();
     db.iter_block::<SBlock>(0, end)
-        .into_par_iter_sync(move |blk| {
+        .into_par_iter_async(move |blk| {
             let len = blk.txdata.len();
             for tx in blk.txdata {
                 for o in tx.output {
