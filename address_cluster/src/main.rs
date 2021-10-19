@@ -1,10 +1,12 @@
 use ahash::AHasher;
 use bitcoin_explorer::{Address, BitcoinDB, SBlock, SConnectedBlock};
 use ena::unify::{InPlaceUnificationTable, UnifyKey};
-use hash_hasher::HashedMap;
+use hash_hasher::{HashBuildHasher, HashedMap};
 use indicatif;
 use indicatif::ProgressStyle;
 use log::{info, LevelFilter};
+use par_iter_sync::*;
+use rayon::prelude::*;
 use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
 use std::fs;
@@ -16,8 +18,6 @@ use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use par_iter_sync::*;
-use rayon::prelude::*;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 struct UnitKey(u32);
@@ -125,9 +125,7 @@ impl AddressCacheRead {
     #[inline]
     fn get_address_index(&self, hash: u128) -> Option<(u32, u32)> {
         // sync
-        self.address_index
-            .get(&hash)
-            .map(|x| x.to_owned())
+        self.address_index.get(&hash).map(|x| x.to_owned())
     }
 }
 
@@ -140,7 +138,7 @@ struct AddressCache {
 }
 
 impl AddressCache {
-    pub fn new(out_dir: &Path) -> AddressCache {
+    pub fn new(out_dir: &Path, capacity: usize) -> AddressCache {
         let file_name = "addresses.csv";
         let mut out_file = out_dir.to_path_buf();
         out_file.extend(Path::new(&file_name));
@@ -158,7 +156,10 @@ impl AddressCache {
             Arc::new(Mutex::new(tb))
         };
         AddressCache {
-            address_index: Arc::new(Mutex::new(HashedMap::default())),
+            address_index: Arc::new(Mutex::new(HashedMap::with_capacity_and_hasher(
+                capacity,
+                HashBuildHasher::default(),
+            ))),
             union_find,
             permanent_store,
         }
@@ -250,15 +251,12 @@ fn main() {
 
     info!("load all addresses");
     // preparing progress bar
-    let total_number_of_transactions = (0..end)
-        .map(|i| db.get_header(i).unwrap().n_tx)
-        .sum::<u32>() as u64;
-    let bar = indicatif::ProgressBar::new(total_number_of_transactions);
+    let bar = indicatif::ProgressBar::new(900000000);
     bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
 
-    let mut address_cache = AddressCache::new(out_dir);
+    let mut address_cache = AddressCache::new(out_dir, 900000000);
     let address_writer_handle = address_cache.pop_handle();
 
     // load all addresses
