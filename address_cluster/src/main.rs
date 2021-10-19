@@ -11,10 +11,10 @@ use std::collections::hash_map::Entry;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Sender;
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -110,10 +110,10 @@ impl AddressCache {
         }
     }
 
-    pub fn connect_addresses_index(&self, addresses_index: &Vec<u32>) {
+    pub fn connect_addresses_index(&self, addresses_index: &Vec<(u32, u32)>) {
         if addresses_index.len() > 1 {
-            let first = addresses_index.first().unwrap();
-            for rest in addresses_index.iter().skip(1) {
+            let (first, _) = addresses_index.first().unwrap();
+            for (rest, _) in addresses_index.iter().skip(1) {
                 // connect rest to first
                 self.union(*first, *rest);
             }
@@ -132,10 +132,11 @@ impl AddressCache {
                 let entry = cache.entry(address_hash);
                 let (index, _) = match entry {
                     Entry::Occupied(mut o) => {
-                        let (index, count) = o.get();
-                        o.insert((*index, count + 1))
+                        let (index, count) = *o.get();
+                        o.insert((index, count + 1))
                     }
                     Entry::Vacant(v) => {
+                        is_new_address = true;
                         *v.insert((new_index, 1))
                     }
                 };
@@ -149,7 +150,7 @@ impl AddressCache {
         }
     }
 
-    pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<u32> {
+    pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<(u32, u32)> {
         if let Some(address_string) = AddressCache::addresses_to_string(addresses) {
             Some(
                 self.get_address_index(AddressCache::hash(&address_string))
@@ -161,37 +162,18 @@ impl AddressCache {
     }
 
     #[inline]
-    fn connected(&self, hash1: u32, hash2: u32) -> bool {
-        self.union_find.lock().unwrap().unioned(hash1, hash2)
-    }
-
-    #[inline]
     fn union(&self, i1: u32, i2: u32) {
         self.union_find.lock().unwrap().union(i1, i2)
     }
 
     #[inline]
-    fn find(&self, i: u32) -> u32 {
-        self.union_find.lock().unwrap().find(i).into()
-    }
-
-    #[inline]
-    pub fn address_hash(addresses: Box<[Address]>) -> Option<u128> {
-        if let Some(addresses) = Self::addresses_to_string(addresses) {
-            Some(Self::hash(&addresses))
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    pub fn get_address_index(&self, hash: u128) -> Option<u32> {
+    pub fn get_address_index(&self, hash: u128) -> Option<(u32, u32)> {
         // sync
         self.address_index
             .lock()
             .unwrap()
             .get(&hash)
-            .map(|(x, _)| x.to_owned())
+            .map(|x| x.to_owned())
     }
 
     #[inline]
@@ -223,6 +205,16 @@ impl AddressCache {
     fn pop_handle(&mut self) -> Option<JoinHandle<()>> {
         self.permanent_store.pop_handle()
     }
+}
+
+fn trailing_zero(value: u64) -> u8 {
+    let mut value = value;
+    let mut count = 0u8;
+    while value % 10 == 0 {
+        count += 1;
+        value = value / 10;
+    }
+    count
 }
 
 fn main() {
@@ -277,37 +269,79 @@ fn main() {
 
     // producer thread
     let producer = thread::spawn(move || {
-        let mut address_cache_clone = address_cache.clone();
-        let par_iter = db
-            .iter_connected_block::<SConnectedBlock>(end)
+        db.iter_connected_block::<SConnectedBlock>(end)
             .into_par_iter_sync(move |blk| {
-                // let mut count = 0;
+                let progress = blk.txdata.len() as u64;
+                // let mut count == 0; // H3
                 for tx in &blk.txdata {
-                    let out_addresses: Vec<u32> = tx
-                        .output
-                        .iter()
-                        .map(|o| address_cache_clone.assert_get_address_index(o.addresses.clone()))
-                        .filter_map(|x| x)
-                        .collect();
                     // H3: coinbase tx
                     // if count == 0 {
                     //     address_cache.connect_addresses_index(&out_addresses);
                     // }
                     // count += 1;
-                }
-                Ok(blk)
-            })
-            .into_par_iter_sync(move |blk| {
-                let progress = blk.txdata.len() as u64;
-                for tx in &blk.txdata {
-                    let in_addresses: Vec<u32> = tx
+
+                    let in_addresses: Vec<(u32, u32)> = tx
                         .input
                         .iter()
                         .map(|i| address_cache.assert_get_address_index(i.addresses.clone()))
                         .filter_map(|x| x)
                         .collect();
-                    // H1: common spending
+
+                    // H1: common spending, all input addresses are connected
                     address_cache.connect_addresses_index(&in_addresses);
+
+                    // H2: OTX
+                    let mut otx_address: Option<u32> = None;
+                    // two output case
+                    if tx.output.len() == 2 {
+                        let first = tx.output.first().unwrap().clone();
+                        let last = tx.output.last().unwrap().clone();
+                        let first_index = address_cache.assert_get_address_index(first.addresses);
+                        let last_index = address_cache.assert_get_address_index(last.addresses);
+
+                        let mut candidate = None;
+                        // first has more decimal places, fewer zeros
+                        if trailing_zero(first.value) + 3 <= trailing_zero(last.value) {
+                            candidate = first_index;
+                        } else if trailing_zero(last.value) + 3 <= trailing_zero(first.value) {
+                            candidate = last_index;
+                        }
+                        if let Some((index, count)) = candidate {
+                            // only appeared once
+                            if count == 1 {
+                                otx_address = Some(index);
+                            }
+                        }
+                    } else if tx.output.len() > 2 {
+                        // H2.4 H2.1 check which index appears only once
+                        let only_once_index: Vec<u32> = tx
+                            .output
+                            .iter()
+                            .map(|o| address_cache.assert_get_address_index(o.addresses.clone()))
+                            .filter_map(|x| {
+                                if let Some((index, count)) = x {
+                                    if count == 1 {
+                                        Some(index)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        // only one address appears only once
+                        if only_once_index.len() == 1 {
+                            otx_address = Some(*only_once_index.first().unwrap())
+                        }
+                    }
+                    if let Some(index) = otx_address {
+                        // H2.2 if not coinbase, H2.3 can be ignored
+                        if in_addresses.len() > 0 {
+                            let (first_in_index, _) = *in_addresses.first().unwrap();
+                            address_cache.union(first_in_index, index)
+                        }
+                    }
                 }
                 Ok(progress)
             })
@@ -321,4 +355,16 @@ fn main() {
 
     // address_cache_writer wait for all address_cache to be dropped
     address_writer_handle.unwrap().join().unwrap();
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test() {
+        assert_eq!(trailing_zero(120), 1u8);
+        assert_eq!(trailing_zero(99999999990), 1u8);
+        assert_eq!(trailing_zero(9000000000000000000), 18u8);
+        assert_eq!(trailing_zero(1200), 2u8);
+    }
 }
