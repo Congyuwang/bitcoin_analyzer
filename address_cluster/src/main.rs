@@ -5,7 +5,6 @@ use hash_hasher::HashedMap;
 use indicatif;
 use indicatif::ProgressStyle;
 use log::{info, LevelFilter};
-use par_iter_sync::IntoParallelIteratorSync;
 use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
 use std::fs;
@@ -17,6 +16,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use par_iter_sync::IntoParallelIteratorSync;
+use rayon::prelude::*;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 struct UnitKey(u32);
@@ -241,7 +242,7 @@ fn main() {
         .unwrap();
     let db = BitcoinDB::new(Path::new("/116020237/bitcoin"), false).unwrap();
     let end = db.get_block_count();
-    let out_dir = Path::new("./out/balances/");
+    let out_dir = Path::new("./out/");
     if !out_dir.exists() {
         fs::create_dir_all(out_dir).unwrap();
     }
@@ -289,7 +290,9 @@ fn main() {
     // producer thread
     let producer = thread::spawn(move || {
         db.iter_connected_block::<SConnectedBlock>(end)
-            .into_par_iter_sync(move |blk| {
+            .par_bridge()
+            .into_par_iter()
+            .map(move |blk| {
                 let progress = blk.txdata.len() as u64;
                 // let mut count == 0; // H3
                 for tx in &blk.txdata {
@@ -362,7 +365,7 @@ fn main() {
                         }
                     }
                 }
-                Ok(progress)
+                progress
             })
             .for_each(|p| bar.inc(p));
         bar.finish();
