@@ -390,11 +390,11 @@ fn main() {
         info!("clustering finished");
     });
 
-    info!("start dumping clustering result");
-    address_cache_to_dump.dump_union_find(&out_dir.to_path_buf().join("clustering.u32little"));
-
     // drop producer first
     producer.join().unwrap();
+
+    info!("start dumping clustering result");
+    address_cache_to_dump.dump_union_find(&out_dir.to_path_buf().join("clustering.u32little"));
 
     // address_cache_writer wait for all address_cache to be dropped
     address_writer_handle.unwrap().join().unwrap();
