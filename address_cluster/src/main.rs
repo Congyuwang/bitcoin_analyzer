@@ -78,6 +78,59 @@ impl AsyncBufWriter {
 }
 
 #[derive(Clone)]
+struct AddressCacheRead {
+    // (index, count)
+    address_index: Arc<HashedMap<u128, (u32, u32)>>,
+    union_find: Arc<Mutex<InPlaceUnificationTable<UnitKey>>>,
+}
+
+impl AddressCacheRead {
+    pub fn from_address_cache(cache: AddressCache) -> Self {
+        let get_inner_lock = Arc::try_unwrap(cache.address_index);
+        AddressCacheRead {
+            address_index: Arc::new(get_inner_lock.unwrap().into_inner().unwrap()),
+            union_find: cache.union_find,
+        }
+    }
+
+    #[inline]
+    pub fn connect_addresses_index(&self, addresses_index: &Vec<(u32, u32)>) {
+        if addresses_index.len() > 1 {
+            let (first, _) = addresses_index.first().unwrap();
+            for (rest, _) in addresses_index.iter().skip(1) {
+                // connect rest to first
+                self.union(*first, *rest);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<(u32, u32)> {
+        if let Some(address_string) = AddressCache::addresses_to_string(addresses) {
+            Some(
+                self.get_address_index(AddressCache::hash(&address_string))
+                    .expect("inputs must exist in UTXO"),
+            )
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn union(&self, i1: u32, i2: u32) {
+        self.union_find.lock().unwrap().union(i1, i2)
+    }
+
+    #[inline]
+    fn get_address_index(&self, hash: u128) -> Option<(u32, u32)> {
+        // sync
+        self.address_index
+            .get(&hash)
+            .map(|x| x.to_owned())
+    }
+}
+
+#[derive(Clone)]
 struct AddressCache {
     // (index, count)
     address_index: Arc<Mutex<HashedMap<u128, (u32, u32)>>>,
@@ -110,16 +163,6 @@ impl AddressCache {
         }
     }
 
-    pub fn connect_addresses_index(&self, addresses_index: &Vec<(u32, u32)>) {
-        if addresses_index.len() > 1 {
-            let (first, _) = addresses_index.first().unwrap();
-            for (rest, _) in addresses_index.iter().skip(1) {
-                // connect rest to first
-                self.union(*first, *rest);
-            }
-        }
-    }
-
     #[inline]
     pub fn add_new_address(&self, addresses: Box<[Address]>) {
         if let Some(addresses_string) = Self::addresses_to_string(addresses) {
@@ -148,32 +191,6 @@ impl AddressCache {
                 self.permanent_store.write_all(line.into_boxed_slice());
             }
         }
-    }
-
-    pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<(u32, u32)> {
-        if let Some(address_string) = AddressCache::addresses_to_string(addresses) {
-            Some(
-                self.get_address_index(AddressCache::hash(&address_string))
-                    .expect("inputs must exist in UTXO"),
-            )
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn union(&self, i1: u32, i2: u32) {
-        self.union_find.lock().unwrap().union(i1, i2)
-    }
-
-    #[inline]
-    pub fn get_address_index(&self, hash: u128) -> Option<(u32, u32)> {
-        // sync
-        self.address_index
-            .lock()
-            .unwrap()
-            .get(&hash)
-            .map(|x| x.to_owned())
     }
 
     #[inline]
@@ -257,6 +274,8 @@ fn main() {
         })
         .for_each(|p| bar.inc(p as u64));
     info!("finished loading all addresses");
+
+    let address_cache = AddressCacheRead::from_address_cache(address_cache);
 
     // preparing progress bar
     let total_number_of_transactions = (0..end)
