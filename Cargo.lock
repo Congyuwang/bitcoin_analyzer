@@ -9,12 +9,12 @@ dependencies = [
  "ahash",
  "bitcoin-explorer",
  "chrono",
+ "ena",
  "hash_hasher",
  "indicatif",
  "log",
  "num_cpus",
  "par-iter-sync",
- "partitions",
  "rayon",
  "rocksdb",
  "rustc-hash",
@@ -275,6 +275,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e78d4f1cc4ae33bbfc157ed5d5a5ef3bc29227303d595861deb238fcec4e9457"
 
 [[package]]
+name = "ena"
+version = "0.14.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "encode_unicode"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -493,10 +500,6 @@ checksum = "342ef6b7e2af067e3a83539b1af2ec17b1b26f03d4f8a8ea2bc8ad2e48f4e98b"
 dependencies = [
  "num_cpus",
 ]
-
-[[package]]
-name = "partitions"
-version = "0.2.4"
 
 [[package]]
 name = "peeking_take_while"

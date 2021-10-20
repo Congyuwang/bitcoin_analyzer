@@ -13,7 +13,7 @@ par-iter-sync = "^0.1"
 simple_logger = "1.13.0"
 ahash = "0.7.4"
 hash_hasher = "2.0.3"
-partitions = { path = "./partitions" }
+ena = { path = "./ena" }
 chrono = "0.4"
 rayon = "1.5"
 rustc-hash = "1.1.0"

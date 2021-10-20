@@ -1,13 +1,13 @@
 use ahash::AHasher;
 use bitcoin_explorer::{Address, BitcoinDB, SBlock, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
+use ena::unify::{InPlaceUnificationTable, UnifyKey};
 use hash_hasher::{HashBuildHasher, HashedMap};
 use indicatif;
 use indicatif::ProgressStyle;
 use log::{info, LevelFilter};
 use num_cpus;
 use par_iter_sync::*;
-use partitions::PartitionVec;
 use rayon::prelude::*;
 use rocksdb::{Options, PlainTableFactoryOptions, SliceTransform, WriteOptions, DB};
 use rustc_hash::FxHashMap;
@@ -17,7 +17,6 @@ use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
-use std::ops::Deref;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
@@ -27,11 +26,28 @@ use std::thread::JoinHandle;
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 struct AddressKey(u32);
 
-impl Deref for AddressKey {
-    type Target = u32;
+impl Into<u32> for AddressKey {
+    fn into(self) -> u32 {
+        self.0
+    }
+}
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl From<u32> for AddressKey {
+    fn from(v: u32) -> Self {
+        AddressKey(v)
+    }
+}
+
+impl UnifyKey for AddressKey {
+    type Value = ();
+    fn index(&self) -> u32 {
+        self.0
+    }
+    fn from_index(u: u32) -> AddressKey {
+        AddressKey(u)
+    }
+    fn tag() -> &'static str {
+        "AddressKey"
     }
 }
 
@@ -75,7 +91,7 @@ impl AsyncBufWriter {
 struct AddressCacheRead {
     // (index, count)
     address_index: Arc<HashedMap<u128, (AddressKey, u32)>>,
-    union_find: Arc<Mutex<PartitionVec<()>>>,
+    union_find: Arc<Mutex<InPlaceUnificationTable<AddressKey>>>,
 }
 
 impl AddressCacheRead {
@@ -93,7 +109,7 @@ impl AddressCacheRead {
             let (first, _) = addresses_index.first().unwrap();
             for (rest, _) in addresses_index.iter().skip(1) {
                 // connect rest to first
-                self.union(*first, *rest);
+                self.union(first, rest);
             }
         }
     }
@@ -111,11 +127,8 @@ impl AddressCacheRead {
     }
 
     #[inline]
-    fn union(&self, i1: AddressKey, i2: AddressKey) {
-        self.union_find
-            .lock()
-            .unwrap()
-            .union(*i1 as usize, *i2 as usize)
+    fn union(&self, i1: &AddressKey, i2: &AddressKey) {
+        self.union_find.lock().unwrap().union(*i1, *i2)
     }
 
     #[inline]
@@ -150,7 +163,7 @@ impl AddressCacheRead {
                 .for_each(|(_, (index, count))| {
                     // reduce the number of array access
                     if count > 1 {
-                        counting_vec[*index as usize] = count
+                        counting_vec[index.index() as usize] = count
                     }
                 });
 
@@ -160,7 +173,7 @@ impl AddressCacheRead {
                 "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
             ));
             (0u32..total_keys)
-                .into_par_iter_sync(move |i| Ok(union_find.find_final(i as usize) as u32))
+                .into_par_iter_sync(move |i| Ok(union_find.get_find(i).index()))
                 .zip(counting_vec)
                 .map(|(cluster, count)| {
                     clustering_writer.write_u32_le(cluster);
@@ -169,7 +182,7 @@ impl AddressCacheRead {
                 })
                 .enumerate()
                 .filter(|(i, _)| i % 10000 == 0)
-                .for_each(|_|{bar.inc(10000)});
+                .for_each(|_| bar.inc(10000));
             bar.finish();
             (
                 clustering_writer.pop_handle().unwrap(),
@@ -185,7 +198,7 @@ impl AddressCacheRead {
 struct AddressCache {
     // (index, count)
     address_index: Arc<Mutex<HashedMap<u128, (AddressKey, u32)>>>,
-    union_find: Arc<Mutex<PartitionVec<()>>>,
+    union_find: Arc<Mutex<InPlaceUnificationTable<AddressKey>>>,
     permanent_store: Arc<DB>,
 }
 
@@ -213,7 +226,9 @@ impl AddressCache {
                 }
             })
         };
-        let union_find = Arc::new(Mutex::new(PartitionVec::with_capacity(900_000_000)));
+        let mut union_table = InPlaceUnificationTable::new();
+        union_table.reserve(900_000_000);
+        let union_find = Arc::new(Mutex::new(union_table));
         AddressCache {
             address_index: Arc::new(Mutex::new(HashedMap::with_capacity_and_hasher(
                 capacity,
@@ -254,9 +269,13 @@ impl AddressCache {
             };
             if is_new_address {
                 self.permanent_store
-                    .put_opt(&index.to_le_bytes()[..], addresses_string, &write_opt)
+                    .put_opt(
+                        &index.index().to_le_bytes()[..],
+                        addresses_string,
+                        &write_opt,
+                    )
                     .expect("fail to write to rocksdb");
-                self.union_find.lock().unwrap().push(());
+                self.union_find.lock().unwrap().new_key(());
             }
         }
     }
@@ -265,7 +284,7 @@ impl AddressCache {
     fn addresses_to_string(addresses: &Box<[Address]>) -> Option<String> {
         match addresses.len() {
             0 => None,
-            1 => Some(addresses.get(0).unwrap().to_string()),
+            1 => Some(addresses.first().unwrap().to_string()),
             _ => {
                 let mut addresses: Vec<String> = addresses.iter().map(|a| a.to_string()).collect();
                 // sort addresses
@@ -293,7 +312,7 @@ impl AddressCache {
 ///
 fn update_balance(
     block: SConnectedBlock,
-    balance: &Arc<Mutex<FxHashMap<u32, i64>>>,
+    balance: &Arc<Mutex<FxHashMap<AddressKey, i64>>>,
     cache: &AddressCacheRead,
 ) {
     block
@@ -304,19 +323,19 @@ fn update_balance(
                 if let Some((address_number, _)) = cache.assert_get_address_index(tx_out.addresses)
                 {
                     let mut balance = balance.lock().unwrap();
-                    *balance.entry(*address_number).or_insert(0) += tx_out.value as i64;
+                    *balance.entry(address_number).or_insert(0) += tx_out.value as i64;
                 }
             }
             for tx_in in tx.input {
                 if let Some((address_number, _)) = cache.assert_get_address_index(tx_in.addresses) {
                     let mut balance = balance.lock().unwrap();
-                    *balance.entry(*address_number).or_insert(0) -= tx_in.value as i64;
+                    *balance.entry(address_number).or_insert(0) -= tx_in.value as i64;
                 }
             }
         });
 }
 
-fn write_balance(balance: &FxHashMap<u32, i64>, out_dir: &Path, date: Date<Utc>) {
+fn write_balance(balance: &FxHashMap<AddressKey, i64>, out_dir: &Path, date: Date<Utc>) {
     let file_name = date.format("%Y-%m-%d").to_string() + ".csv";
     let mut out_file = out_dir.to_path_buf();
     out_file.extend(Path::new(&file_name));
@@ -326,7 +345,7 @@ fn write_balance(balance: &FxHashMap<u32, i64>, out_dir: &Path, date: Date<Utc>)
     writer.write(header.as_bytes()).unwrap();
     for (k, v) in balance {
         if *v != 0 {
-            let line = (k.to_string() + "," + &v.to_string() + "\n").into_bytes();
+            let line = (k.index().to_string() + "," + &v.to_string() + "\n").into_bytes();
             writer.write(&line).unwrap();
         }
     }
@@ -380,7 +399,7 @@ fn main() {
 
     // balance writer
     let (balance_sender, balance_receiver) =
-        mpsc::channel::<(Arc<Mutex<FxHashMap<u32, i64>>>, Date<Utc>)>();
+        mpsc::channel::<(Arc<Mutex<FxHashMap<AddressKey, i64>>>, Date<Utc>)>();
 
     // start balance writer thread
     let balance_writer = thread::spawn(move || {
@@ -391,7 +410,8 @@ fn main() {
 
     // load all addresses
     let address_cache_clone = address_cache.clone();
-    let address_loader = db.iter_block::<SBlock>(0, end)
+    let address_loader = db
+        .iter_block::<SBlock>(0, end)
         .into_par_iter_async(move |blk| {
             let len = blk.txdata.len();
             for tx in blk.txdata {
@@ -417,7 +437,7 @@ fn main() {
     // logic to cluster addresses
     let block_iter = db
         .iter_connected_block::<SConnectedBlock>(end)
-        .into_par_iter_async(move |blk| {
+        .into_par_iter_sync(move |blk| {
             for tx in &blk.txdata {
                 let in_addresses: Vec<(AddressKey, u32)> = tx
                     .input
@@ -478,7 +498,7 @@ fn main() {
                     // H2.2 if not coinbase, H2.3 can be ignored
                     if in_addresses.len() > 0 {
                         let (first_in_index, _) = *in_addresses.first().unwrap();
-                        address_cache.union(first_in_index, index)
+                        address_cache.union(&first_in_index, &index)
                     }
                 }
             }
@@ -491,7 +511,7 @@ fn main() {
     bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
-    let mut bal_change: Arc<Mutex<FxHashMap<u32, i64>>> =
+    let mut bal_change: Arc<Mutex<FxHashMap<AddressKey, i64>>> =
         Arc::new(Mutex::new(FxHashMap::default()));
     let mut prev_date: Option<Date<Utc>> = None;
     let mut progress = 0;
@@ -547,7 +567,7 @@ mod test {
         (0u32..877499259u32)
             .into_par_iter_sync(move |i| Ok(i))
             .filter(|i| i % 1000 == 0)
-            .for_each(|_| {bar.inc(1000)});
+            .for_each(|_| bar.inc(1000));
         bar.finish();
     }
 }
