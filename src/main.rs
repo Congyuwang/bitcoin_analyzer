@@ -162,11 +162,14 @@ impl AddressCacheRead {
             (0u32..total_keys)
                 .into_par_iter_sync(move |i| Ok(union_find.find_final(i as usize) as u32))
                 .zip(counting_vec)
-                .for_each(|(cluster, count)| {
+                .map(|(cluster, count)| {
                     clustering_writer.write_u32_le(cluster);
                     counting_writer.write_u32_le(count);
-                    bar.inc(1);
-                });
+                    ()
+                })
+                .enumerate()
+                .filter(|(i, _)| i % 10000 == 0)
+                .for_each(|_|{bar.inc(10000)});
             bar.finish();
             (
                 clustering_writer.pop_handle().unwrap(),
@@ -388,7 +391,7 @@ fn main() {
 
     // load all addresses
     let address_cache_clone = address_cache.clone();
-    db.iter_block::<SBlock>(0, end)
+    let address_loader = db.iter_block::<SBlock>(0, end)
         .into_par_iter_async(move |blk| {
             let len = blk.txdata.len();
             for tx in blk.txdata {
@@ -397,8 +400,15 @@ fn main() {
                 }
             }
             Ok(len)
-        })
-        .for_each(|p| bar.inc(p as u64));
+        });
+    let mut progress_tracker = 0;
+    for progress in address_loader {
+        progress_tracker += progress;
+        if progress_tracker > 10000 {
+            bar.inc(progress_tracker as u64);
+            progress_tracker = 0;
+        }
+    }
     info!("finished loading all addresses");
 
     let address_cache = AddressCacheRead::from_address_cache(address_cache);
@@ -484,6 +494,7 @@ fn main() {
     let mut bal_change: Arc<Mutex<FxHashMap<u32, i64>>> =
         Arc::new(Mutex::new(FxHashMap::default()));
     let mut prev_date: Option<Date<Utc>> = None;
+    let mut progress = 0;
     for blk in block_iter {
         let datetime = NaiveDateTime::from_timestamp(blk.header.time as i64, 0);
         let date = Date::from_utc(datetime.date(), Utc);
@@ -498,7 +509,11 @@ fn main() {
         prev_date = Some(date);
         let len = blk.txdata.len();
         update_balance(blk, &bal_change, &address_cache_to_dump);
-        bar.inc(len as u64)
+        progress += len;
+        if progress > 10000 {
+            bar.inc(progress as u64);
+            progress = 0;
+        }
     }
     bar.finish();
 
@@ -521,5 +536,18 @@ mod test {
         assert_eq!(trailing_zero(9000000000000000000), 18u8);
         assert_eq!(trailing_zero(0), 0u8);
         assert_eq!(trailing_zero(1200), 2u8);
+    }
+
+    #[test]
+    fn test2() {
+        let bar = indicatif::ProgressBar::new(877499259);
+        bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
+        ));
+        (0u32..877499259u32)
+            .into_par_iter_sync(move |i| Ok(i))
+            .filter(|i| i % 1000 == 0)
+            .for_each(|_| {bar.inc(1000)});
+        bar.finish();
     }
 }
