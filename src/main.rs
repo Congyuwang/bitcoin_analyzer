@@ -1,51 +1,50 @@
 use ahash::AHasher;
 use bitcoin_explorer::{Address, BitcoinDB, SBlock, SConnectedBlock};
-use ena::unify::{InPlaceUnificationTable, UnifyKey};
+use chrono::{Date, NaiveDateTime, Utc};
+use db_key::Key;
 use hash_hasher::{HashBuildHasher, HashedMap};
 use indicatif;
 use indicatif::ProgressStyle;
+use leveldb::database::Database;
+use leveldb::kv::KV;
+use leveldb::options::{Options, WriteOptions};
 use log::{info, LevelFilter};
 use par_iter_sync::*;
+use partitions::PartitionVec;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
+use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use chrono::{Date, NaiveDateTime, Utc};
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-struct UnitKey(u32);
+struct AddressKey(u32);
 
-impl Into<u32> for UnitKey {
-    fn into(self) -> u32 {
-        self.0
+impl Deref for AddressKey {
+    type Target = u32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-impl From<u32> for UnitKey {
-    fn from(v: u32) -> Self {
-        UnitKey(v)
+impl Key for AddressKey {
+    fn from_u8(key: &[u8]) -> Self {
+        AddressKey(u32::from_le_bytes(key.try_into().unwrap()))
     }
-}
 
-impl UnifyKey for UnitKey {
-    type Value = ();
-    fn index(&self) -> u32 {
-        self.0
-    }
-    fn from_index(u: u32) -> UnitKey {
-        UnitKey(u)
-    }
-    fn tag() -> &'static str {
-        "UnitKey"
+    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
+        f(&self.0.to_le_bytes()[..])
     }
 }
 
@@ -88,8 +87,8 @@ impl AsyncBufWriter {
 #[derive(Clone)]
 struct AddressCacheRead {
     // (index, count)
-    address_index: Arc<HashedMap<u128, (u32, u32)>>,
-    union_find: Arc<Mutex<InPlaceUnificationTable<UnitKey>>>,
+    address_index: Arc<HashedMap<u128, (AddressKey, u32)>>,
+    union_find: Arc<Mutex<PartitionVec<()>>>,
 }
 
 impl AddressCacheRead {
@@ -102,7 +101,7 @@ impl AddressCacheRead {
     }
 
     #[inline]
-    pub fn connect_addresses_index(&self, addresses_index: &Vec<(u32, u32)>) {
+    pub fn connect_addresses_index(&self, addresses_index: &Vec<(AddressKey, u32)>) {
         if addresses_index.len() > 1 {
             let (first, _) = addresses_index.first().unwrap();
             for (rest, _) in addresses_index.iter().skip(1) {
@@ -113,7 +112,7 @@ impl AddressCacheRead {
     }
 
     #[inline]
-    pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<(u32, u32)> {
+    pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<(AddressKey, u32)> {
         if let Some(address_string) = AddressCache::addresses_to_string(&addresses) {
             Some(
                 self.get_address_index(AddressCache::hash(&address_string))
@@ -125,12 +124,15 @@ impl AddressCacheRead {
     }
 
     #[inline]
-    fn union(&self, i1: u32, i2: u32) {
-        self.union_find.lock().unwrap().union(i1, i2)
+    fn union(&self, i1: AddressKey, i2: AddressKey) {
+        self.union_find
+            .lock()
+            .unwrap()
+            .union(*i1 as usize, *i2 as usize)
     }
 
     #[inline]
-    fn get_address_index(&self, hash: u128) -> Option<(u32, u32)> {
+    fn get_address_index(&self, hash: u128) -> Option<(AddressKey, u32)> {
         // sync
         self.address_index.get(&hash).map(|x| x.to_owned())
     }
@@ -141,20 +143,27 @@ impl AddressCacheRead {
             let counting_path = path.to_path_buf().join("counting.u32little");
             let mut clustering_writer = AsyncBufWriter::new(File::create(clustering_path).unwrap());
             let mut counting_writer = AsyncBufWriter::new(File::create(counting_path).unwrap());
-            let union_find = Arc::try_unwrap(self.union_find).expect("some other still owns self.union_find");
+            let union_find =
+                Arc::try_unwrap(self.union_find).expect("some other still owns self.union_find");
             let union_find = Arc::new(union_find.into_inner().expect("failed to unlock"));
 
             let total_keys = union_find.len() as u32;
-            assert_eq!(total_keys, self.address_index.len() as u32, "union find does not agree with address index");
+            assert_eq!(
+                total_keys,
+                self.address_index.len() as u32,
+                "union find does not agree with address index"
+            );
 
             info!("Converting address hashmap to address counting array");
-            let consumes_hash_map = Arc::try_unwrap(self.address_index).expect("some other still owns self.address_index");
+            let consumes_hash_map = Arc::try_unwrap(self.address_index)
+                .expect("some other still owns self.address_index");
             let mut counting_vec = vec![1u32; consumes_hash_map.len()];
-            consumes_hash_map.into_iter()
+            consumes_hash_map
+                .into_iter()
                 .for_each(|(_, (index, count))| {
                     // reduce the number of array access
                     if count > 1 {
-                        counting_vec[index as usize] = count
+                        counting_vec[*index as usize] = count
                     }
                 });
 
@@ -164,9 +173,7 @@ impl AddressCacheRead {
                 "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
             ));
             (0u32..total_keys)
-                .into_par_iter_sync(move|i| {
-                    Ok(union_find.get_find(i).index())
-                })
+                .into_par_iter_sync(move |i| Ok(union_find.find_final(i as usize) as u32))
                 .zip(counting_vec)
                 .for_each(|(cluster, count)| {
                     clustering_writer.write_u32_le(cluster);
@@ -174,7 +181,10 @@ impl AddressCacheRead {
                     bar.inc(1);
                 });
             bar.finish();
-            (clustering_writer.pop_handle().unwrap(), counting_writer.pop_handle().unwrap())
+            (
+                clustering_writer.pop_handle().unwrap(),
+                counting_writer.pop_handle().unwrap(),
+            )
         };
         write_handle.0.join().unwrap();
         write_handle.1.join().unwrap();
@@ -184,23 +194,26 @@ impl AddressCacheRead {
 #[derive(Clone)]
 struct AddressCache {
     // (index, count)
-    address_index: Arc<Mutex<HashedMap<u128, (u32, u32)>>>,
-    union_find: Arc<Mutex<InPlaceUnificationTable<UnitKey>>>,
-    permanent_store: AsyncBufWriter,
+    address_index: Arc<Mutex<HashedMap<u128, (AddressKey, u32)>>>,
+    union_find: Arc<Mutex<PartitionVec<()>>>,
+    permanent_store: Arc<Database<AddressKey>>,
 }
 
 impl AddressCache {
     pub fn new(out_dir: &Path, capacity: usize) -> AddressCache {
-        let file_name = "addresses";
-        let mut out_file = out_dir.to_path_buf();
-        out_file.extend(Path::new(&file_name));
-        let out_file = File::create(out_file).unwrap();
-        let permanent_store = AsyncBufWriter::new(out_file);
-        let union_find = {
-            let mut tb = InPlaceUnificationTable::new();
-            tb.reserve(900_000_000);
-            Arc::new(Mutex::new(tb))
+        let option = {
+            let mut o = Options::new();
+            o.create_if_missing = true;
+            o.block_size = Some(1024 * 1024 * 1024);
+            o.write_buffer_size = Some(128 * 1024 * 1024);
+            o.error_if_exists = true;
+            o
         };
+        let permanent_store = Arc::new(match Database::open(out_dir, option) {
+            Ok(db) => db,
+            Err(e) => panic!("Failed to store addresses index: {}", e),
+        });
+        let union_find = Arc::new(Mutex::new(PartitionVec::with_capacity(900_000_000)));
         AddressCache {
             address_index: Arc::new(Mutex::new(HashedMap::with_capacity_and_hasher(
                 capacity,
@@ -219,7 +232,7 @@ impl AddressCache {
             // cache lock scope
             let index = {
                 let mut cache = self.address_index.lock().unwrap();
-                let new_index = cache.len() as u32;
+                let new_index = AddressKey(cache.len() as u32);
                 let entry = cache.entry(address_hash);
                 let (index, _) = match entry {
                     Entry::Occupied(mut o) => {
@@ -235,15 +248,9 @@ impl AddressCache {
                 index
             };
             if is_new_address {
-                let mut line = Vec::new();
-                // address index u32
-                line.extend(index.to_le_bytes());
-                // address length u16
-                line.extend((addresses_string.len() as u16).to_le_bytes());
-                // address string
-                line.extend(addresses_string.as_bytes());
-                self.permanent_store.write_all(line.as_slice());
-                self.union_find.lock().unwrap().new_key(());
+                self.permanent_store
+                    .put(WriteOptions::new(), index, addresses_string.as_bytes()).expect("failed to write to levelDB");
+                self.union_find.lock().unwrap().push(());
             }
         }
     }
@@ -254,8 +261,7 @@ impl AddressCache {
             0 => None,
             1 => Some(addresses.get(0).unwrap().to_string()),
             _ => {
-                let mut addresses: Vec<String> =
-                    addresses.iter().map(|a| a.to_string()).collect();
+                let mut addresses: Vec<String> = addresses.iter().map(|a| a.to_string()).collect();
                 // sort addresses
                 addresses.sort();
                 Some(addresses.join("-"))
@@ -273,10 +279,6 @@ impl AddressCache {
         let hash_1 = hasher_1.finish() as u128;
         hash_0 ^ hash_1
     }
-
-    fn pop_handle(&mut self) -> Option<JoinHandle<()>> {
-        self.permanent_store.pop_handle()
-    }
 }
 
 ///
@@ -288,20 +290,24 @@ fn update_balance(
     balance: &Arc<Mutex<FxHashMap<u32, i64>>>,
     cache: &AddressCacheRead,
 ) {
-    block.txdata.into_par_iter().for_each_with(cache.clone(), |cache, tx| {
-        for tx_out in tx.output {
-            if let Some((address_number, _)) = cache.assert_get_address_index(tx_out.addresses) {
-                let mut balance = balance.lock().unwrap();
-                *balance.entry(address_number).or_insert(0) += tx_out.value as i64;
+    block
+        .txdata
+        .into_par_iter()
+        .for_each_with(cache.clone(), |cache, tx| {
+            for tx_out in tx.output {
+                if let Some((address_number, _)) = cache.assert_get_address_index(tx_out.addresses)
+                {
+                    let mut balance = balance.lock().unwrap();
+                    *balance.entry(*address_number).or_insert(0) += tx_out.value as i64;
+                }
             }
-        }
-        for tx_in in tx.input {
-            if let Some((address_number, _)) = cache.assert_get_address_index(tx_in.addresses) {
-                let mut balance = balance.lock().unwrap();
-                *balance.entry(address_number).or_insert(0) -= tx_in.value as i64;
+            for tx_in in tx.input {
+                if let Some((address_number, _)) = cache.assert_get_address_index(tx_in.addresses) {
+                    let mut balance = balance.lock().unwrap();
+                    *balance.entry(*address_number).or_insert(0) -= tx_in.value as i64;
+                }
             }
-        }
-    });
+        });
 }
 
 fn write_balance(balance: &FxHashMap<u32, i64>, out_dir: &Path, date: Date<Utc>) {
@@ -342,12 +348,13 @@ fn main() {
     let db = BitcoinDB::new(Path::new("/116020237/bitcoin"), false).unwrap();
     let end = db.get_block_count();
     let out_dir = Path::new("./out/");
-    let bal_out_dir = Path::new("./out/balance");
-    if !out_dir.exists() {
-        fs::create_dir_all(out_dir).unwrap();
-    }
+    let bal_out_dir = out_dir.to_path_buf().join("balance");
+    let address_out_dir = out_dir.to_path_buf().join("address");
     if !bal_out_dir.exists() {
-        fs::create_dir_all(bal_out_dir).unwrap();
+        fs::create_dir_all(&bal_out_dir).unwrap();
+    }
+    if !address_out_dir.exists() {
+        fs::create_dir_all(&address_out_dir).unwrap();
     }
     info!("launching DB finished");
 
@@ -363,16 +370,16 @@ fn main() {
         "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
     ));
 
-    let mut address_cache = AddressCache::new(out_dir, 900000000);
-    let address_writer_handle = address_cache.pop_handle();
+    let address_cache = AddressCache::new(&address_out_dir, 900000000);
 
     // balance writer
-    let (balance_sender, balance_receiver) = mpsc::channel::<(Arc<Mutex<FxHashMap<u32, i64>>>, Date<Utc>)>();
+    let (balance_sender, balance_receiver) =
+        mpsc::channel::<(Arc<Mutex<FxHashMap<u32, i64>>>, Date<Utc>)>();
 
     // start balance writer thread
     let balance_writer = thread::spawn(move || {
         for (balance, date) in balance_receiver.into_iter() {
-            write_balance(&balance.lock().unwrap(), bal_out_dir, date);
+            write_balance(&balance.lock().unwrap(), &bal_out_dir, date);
         }
     });
 
@@ -395,10 +402,11 @@ fn main() {
     let address_cache_to_dump = address_cache.clone();
 
     // logic to cluster addresses
-    let block_iter = db.iter_connected_block::<SConnectedBlock>(end)
+    let block_iter = db
+        .iter_connected_block::<SConnectedBlock>(end)
         .into_par_iter_async(move |blk| {
             for tx in &blk.txdata {
-                let in_addresses: Vec<(u32, u32)> = tx
+                let in_addresses: Vec<(AddressKey, u32)> = tx
                     .input
                     .iter()
                     .map(|i| address_cache.assert_get_address_index(i.addresses.clone()))
@@ -409,7 +417,7 @@ fn main() {
                 address_cache.connect_addresses_index(&in_addresses);
 
                 // H2: OTX
-                let mut otx_address: Option<u32> = None;
+                let mut otx_address: Option<AddressKey> = None;
                 // two output case
                 if tx.output.len() == 2 {
                     let first = tx.output.first().unwrap().clone();
@@ -432,7 +440,7 @@ fn main() {
                     }
                 } else if tx.output.len() > 2 {
                     // H2.4 H2.1 check which index appears only once
-                    let only_once_index: Vec<u32> = tx
+                    let only_once_index: Vec<AddressKey> = tx
                         .output
                         .iter()
                         .map(|o| address_cache.assert_get_address_index(o.addresses.clone()))
@@ -478,7 +486,9 @@ fn main() {
         let date = Date::from_utc(datetime.date(), Utc);
         if let Some(prev_date) = prev_date {
             if date > prev_date {
-                balance_sender.send((bal_change, prev_date.clone())).unwrap();
+                balance_sender
+                    .send((bal_change, prev_date.clone()))
+                    .unwrap();
                 bal_change = Arc::new(Mutex::new(FxHashMap::default()));
             }
         }
@@ -493,7 +503,6 @@ fn main() {
     address_cache_to_dump.dump(&out_dir);
 
     // join remaining threads
-    address_writer_handle.unwrap().join().unwrap();
     balance_writer.join().unwrap();
 
     info!("job finished");
