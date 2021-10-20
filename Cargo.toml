@@ -17,5 +17,5 @@ partitions = { path = "./partitions" }
 chrono = "0.4"
 rayon = "1.5"
 rustc-hash = "1.1.0"
-leveldb = "=0.8.6"
-db-key = "=0.0.5"
+rocksdb = "^0.17"
+num_cpus = "^1.13"

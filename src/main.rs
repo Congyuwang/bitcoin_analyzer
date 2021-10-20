@@ -1,21 +1,18 @@
 use ahash::AHasher;
 use bitcoin_explorer::{Address, BitcoinDB, SBlock, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
-use db_key::Key;
 use hash_hasher::{HashBuildHasher, HashedMap};
 use indicatif;
 use indicatif::ProgressStyle;
-use leveldb::database::Database;
-use leveldb::kv::KV;
-use leveldb::options::{Options, WriteOptions};
 use log::{info, LevelFilter};
+use num_cpus;
 use par_iter_sync::*;
 use partitions::PartitionVec;
 use rayon::prelude::*;
+use rocksdb::{Options, PlainTableFactoryOptions, SliceTransform, WriteOptions, DB};
 use rustc_hash::FxHashMap;
 use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
-use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -35,16 +32,6 @@ impl Deref for AddressKey {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl Key for AddressKey {
-    fn from_u8(key: &[u8]) -> Self {
-        AddressKey(u32::from_le_bytes(key.try_into().unwrap()))
-    }
-
-    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
-        f(&self.0.to_le_bytes()[..])
     }
 }
 
@@ -196,22 +183,33 @@ struct AddressCache {
     // (index, count)
     address_index: Arc<Mutex<HashedMap<u128, (AddressKey, u32)>>>,
     union_find: Arc<Mutex<PartitionVec<()>>>,
-    permanent_store: Arc<Database<AddressKey>>,
+    permanent_store: Arc<DB>,
 }
 
 impl AddressCache {
     pub fn new(out_dir: &Path, capacity: usize) -> AddressCache {
-        let option = {
-            let mut o = Options::new();
-            o.create_if_missing = true;
-            o.write_buffer_size = Some(128 * 1024 * 1024);
-            o.error_if_exists = true;
-            o
+        let permanent_store = {
+            let mut options = Options::default();
+            options.set_error_if_exists(true);
+            options.create_if_missing(true);
+            options.set_max_background_jobs(num_cpus::get() as i32);
+            options.set_write_buffer_size(0x10000000);
+            options.set_max_bytes_for_level_base(0x40000000);
+            options.set_target_file_size_base(0x10000000);
+            options.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+            options.set_plain_table_factory(&PlainTableFactoryOptions {
+                user_key_length: 4,
+                bloom_bits_per_key: 10,
+                hash_table_ratio: 0.75,
+                index_sparseness: 16,
+            });
+            Arc::new(match DB::open(&options, out_dir) {
+                Ok(db) => db,
+                Err(e) => {
+                    panic!("failed to create temp rocksDB for UTXO: {}", e);
+                }
+            })
         };
-        let permanent_store = Arc::new(match Database::open(out_dir, option) {
-            Ok(db) => db,
-            Err(e) => panic!("Failed to store addresses index: {}", e),
-        });
         let union_find = Arc::new(Mutex::new(PartitionVec::with_capacity(900_000_000)));
         AddressCache {
             address_index: Arc::new(Mutex::new(HashedMap::with_capacity_and_hasher(
@@ -229,6 +227,11 @@ impl AddressCache {
             let address_hash = Self::hash(&addresses_string);
             let mut is_new_address = false;
             // cache lock scope
+            let write_opt = {
+                let mut o = WriteOptions::default();
+                o.disable_wal(true);
+                o
+            };
             let index = {
                 let mut cache = self.address_index.lock().unwrap();
                 let new_index = AddressKey(cache.len() as u32);
@@ -248,7 +251,8 @@ impl AddressCache {
             };
             if is_new_address {
                 self.permanent_store
-                    .put(WriteOptions::new(), index, addresses_string.as_bytes()).expect("failed to write to levelDB");
+                    .put_opt(&index.to_le_bytes()[..], addresses_string, &write_opt)
+                    .expect("fail to write to rocksdb");
                 self.union_find.lock().unwrap().push(());
             }
         }

@@ -102,7 +102,6 @@ impl<T> PartitionVec<T> {
         self.meta.push(Metadata::new(old_len));
     }
 
-
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.data.reserve(additional);
@@ -129,10 +128,12 @@ impl<T> PartitionVec<T> {
     pub fn len(&self) -> usize {
         self.data.len()
     }
-
 }
 
-impl<T> std::fmt::Debug for PartitionVec<T> where T: std::fmt::Debug {
+impl<T> std::fmt::Debug for PartitionVec<T>
+where
+    T: std::fmt::Debug,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut builder = f.debug_list();
         builder.entry(&format_args!("PartitionVec of length {}", &self.len()));
