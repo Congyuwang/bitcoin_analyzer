@@ -392,7 +392,6 @@ fn main() {
     info!("finished loading all addresses");
 
     let address_cache = AddressCacheRead::from_address_cache(address_cache);
-    let address_cache_for_balance = address_cache.clone();
     let address_cache_to_dump = address_cache.clone();
 
     // logic to cluster addresses
@@ -465,44 +464,36 @@ fn main() {
             Ok(blk)
         });
 
-    // producer thread
-    let producer = thread::spawn(move || {
-
-        info!("start clustering address and compute daily balance");
-        let bar = indicatif::ProgressBar::new(total_number_of_transactions);
-        bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
-        ));
-        let mut bal_change: Arc<Mutex<FxHashMap<u32, i64>>> =
-            Arc::new(Mutex::new(FxHashMap::default()));
-        let mut prev_date: Option<Date<Utc>> = None;
-        for blk in block_iter {
-            let datetime = NaiveDateTime::from_timestamp(blk.header.time as i64, 0);
-            let date = Date::from_utc(datetime.date(), Utc);
-            if let Some(prev_date) = prev_date {
-                if date > prev_date {
-                    balance_sender.send((bal_change, prev_date.clone())).unwrap();
-                    bal_change = Arc::new(Mutex::new(FxHashMap::default()));
-                }
+    // clustering and balance computing
+    info!("start clustering address and compute daily balance");
+    let bar = indicatif::ProgressBar::new(total_number_of_transactions);
+    bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
+        "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
+    ));
+    let mut bal_change: Arc<Mutex<FxHashMap<u32, i64>>> =
+        Arc::new(Mutex::new(FxHashMap::default()));
+    let mut prev_date: Option<Date<Utc>> = None;
+    for blk in block_iter {
+        let datetime = NaiveDateTime::from_timestamp(blk.header.time as i64, 0);
+        let date = Date::from_utc(datetime.date(), Utc);
+        if let Some(prev_date) = prev_date {
+            if date > prev_date {
+                balance_sender.send((bal_change, prev_date.clone())).unwrap();
+                bal_change = Arc::new(Mutex::new(FxHashMap::default()));
             }
-            prev_date = Some(date);
-            let len = blk.txdata.len();
-            update_balance(blk, &bal_change, &address_cache_for_balance);
-            bar.inc(len as u64)
         }
-        bar.finish();
+        prev_date = Some(date);
+        let len = blk.txdata.len();
+        update_balance(blk, &bal_change, &address_cache_to_dump);
+        bar.inc(len as u64)
+    }
+    bar.finish();
 
-    });
-
-    // drop producer first
-    producer.join().unwrap();
-
+    // no more other reference to address_cache, dump clustering and counting result
     address_cache_to_dump.dump(&out_dir);
 
-    // address_cache_writer wait for all address_cache to be dropped
+    // join remaining threads
     address_writer_handle.unwrap().join().unwrap();
-
-    // writer thread block on producer senders, wait for senders
     balance_writer.join().unwrap();
 
     info!("job finished");
