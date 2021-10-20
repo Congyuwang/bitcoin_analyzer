@@ -135,25 +135,49 @@ impl AddressCacheRead {
         self.address_index.get(&hash).map(|x| x.to_owned())
     }
 
-    #[inline]
-    fn dump_union_find(&self, path: &Path) {
+    fn dump(self, path: &Path) {
         let write_handle = {
-            let mut file_writer = AsyncBufWriter::new(File::create(path).unwrap());
-            let mut lock_union_find = self.union_find.lock().unwrap();
-            let total_keys = lock_union_find.len() as u32;
+            let clustering_path = path.to_path_buf().join("clustering.u32little");
+            let counting_path = path.to_path_buf().join("counting.u32little");
+            let mut clustering_writer = AsyncBufWriter::new(File::create(clustering_path).unwrap());
+            let mut counting_writer = AsyncBufWriter::new(File::create(counting_path).unwrap());
+            let union_find = Arc::try_unwrap(self.union_find).expect("some other still owns self.union_find");
+            let union_find = Arc::new(union_find.into_inner().expect("failed to unlock"));
+
+            let total_keys = union_find.len() as u32;
+            assert_eq!(total_keys, self.address_index.len() as u32, "union find does not agree with address index");
+
+            info!("Converting address hashmap to address counting array");
+            let consumes_hash_map = Arc::try_unwrap(self.address_index).expect("some other still owns self.address_index");
+            let mut counting_vec = vec![1u32; consumes_hash_map.len()];
+            consumes_hash_map.into_iter()
+                .for_each(|(_, (index, count))| {
+                    // reduce the number of array access
+                    if count > 1 {
+                        counting_vec[index as usize] = count
+                    }
+                });
+
+            info!("start dumping address counting and clustering result");
             let bar = indicatif::ProgressBar::new(total_keys as u64);
             bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
                 "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
             ));
-            for i in 0u32..total_keys {
-                let root = lock_union_find.find(i).index();
-                file_writer.write_u32_le(root);
-                bar.inc(1);
-            }
+            (0u32..total_keys)
+                .into_par_iter_sync(move|i| {
+                    Ok(union_find.get_find(i).index())
+                })
+                .zip(counting_vec)
+                .for_each(|(cluster, count)| {
+                    clustering_writer.write_u32_le(cluster);
+                    counting_writer.write_u32_le(count);
+                    bar.inc(1);
+                });
             bar.finish();
-            file_writer.pop_handle().unwrap()
+            (clustering_writer.pop_handle().unwrap(), counting_writer.pop_handle().unwrap())
         };
-        write_handle.join().unwrap();
+        write_handle.0.join().unwrap();
+        write_handle.1.join().unwrap();
     }
 }
 
@@ -473,8 +497,7 @@ fn main() {
     // drop producer first
     producer.join().unwrap();
 
-    info!("start dumping clustering result");
-    address_cache_to_dump.dump_union_find(&out_dir.to_path_buf().join("clustering.u32little"));
+    address_cache_to_dump.dump(&out_dir);
 
     // address_cache_writer wait for all address_cache to be dropped
     address_writer_handle.unwrap().join().unwrap();
