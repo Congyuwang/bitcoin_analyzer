@@ -1,6 +1,8 @@
 use ahash::AHasher;
 use bitcoin_explorer::{Address, BitcoinDB, SBlock, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
+use crossbeam::channel;
+use crossbeam::channel::Sender;
 use ena::unify::{InPlaceUnificationTable, UnifyKey};
 use hash_hasher::{HashBuildHasher, HashedMap};
 use indicatif;
@@ -18,10 +20,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use crossbeam::channel::Sender;
-use crossbeam::channel;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -169,31 +168,13 @@ impl AddressCacheRead {
                     }
                 });
 
-            info!("start fetching clustering result");
+            info!("start dumping address counting and clustering result");
             let bar = indicatif::ProgressBar::new(total_keys as u64);
             bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
                 "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
             ));
-            let progress_count = AtomicUsize::new(0);
-            let groups: Vec<u32> = (0u32..total_keys)
-                .par_bridge()
-                .into_par_iter()
-                .map(|key| {
-                    let group = union_find.get_find(key).index();
-                    let p = progress_count.fetch_add(1, Ordering::SeqCst);
-                    if p % 10000 == 0 {
-                        bar.set_position(p as u64);
-                    }
-                    group
-                }).collect();
-            bar.finish();
-
-            info!("start dumping counting and clustering result");
-            let bar = indicatif::ProgressBar::new(total_keys as u64);
-            bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
-                "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
-            ));
-            groups.into_iter()
+            (0u32..total_keys)
+                .into_par_iter_sync(move |i| Ok(union_find.get_find(i).index()))
                 .zip(counting_vec)
                 .map(|(cluster, count)| {
                     clustering_writer.write_u32_le(cluster);
@@ -232,7 +213,7 @@ impl AddressCache {
             options.set_write_buffer_size(0x10000000);
             options.set_max_bytes_for_level_base(0x40000000);
             options.set_target_file_size_base(0x10000000);
-            options.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+            options.set_prefix_extractor(SliceTransform::create_fixed_prefix(4));
             options.set_plain_table_factory(&PlainTableFactoryOptions {
                 user_key_length: 4,
                 bloom_bits_per_key: 10,
