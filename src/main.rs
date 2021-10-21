@@ -449,6 +449,7 @@ fn main() {
             progress_tracker = 0;
         }
     }
+    bar.finish();
     info!("finished loading all addresses");
 
     let address_cache = AddressCacheRead::from_address_cache(address_cache);
