@@ -540,7 +540,9 @@ fn main() {
     // no more other reference to address_cache, dump clustering and counting result
     address_cache_to_dump.dump(&out_dir);
 
-    // join remaining threads
+    // drop sender
+    drop(balance_sender);
+    // join receiver thread
     balance_writer.join().unwrap();
 
     info!("job finished");
