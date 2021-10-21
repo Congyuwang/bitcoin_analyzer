@@ -18,8 +18,10 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::mpsc::Sender;
-use std::sync::{mpsc, Arc, Mutex};
+use crossbeam::channel::Sender;
+use crossbeam::channel;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -59,7 +61,7 @@ struct AsyncBufWriter {
 
 impl AsyncBufWriter {
     fn new(writer: File) -> AsyncBufWriter {
-        let (sender, receiver) = mpsc::channel::<Box<[u8]>>();
+        let (sender, receiver) = channel::unbounded::<Box<[u8]>>();
         let mut writer = BufWriter::with_capacity(128 * 1024 * 1024, writer);
         let worker = thread::spawn(move || {
             for line in receiver.into_iter() {
@@ -167,13 +169,31 @@ impl AddressCacheRead {
                     }
                 });
 
-            info!("start dumping address counting and clustering result");
+            info!("start fetching clustering result");
             let bar = indicatif::ProgressBar::new(total_keys as u64);
             bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
                 "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
             ));
-            (0u32..total_keys)
-                .into_par_iter_sync(move |i| Ok(union_find.get_find(i).index()))
+            let progress_count = AtomicUsize::new(0);
+            let groups: Vec<u32> = (0u32..total_keys)
+                .par_bridge()
+                .into_par_iter()
+                .map(|key| {
+                    let group = union_find.get_find(key).index();
+                    let p = progress_count.fetch_add(1, Ordering::SeqCst);
+                    if p % 10000 == 0 {
+                        bar.set_position(p as u64);
+                    }
+                    group
+                }).collect();
+            bar.finish();
+
+            info!("start dumping counting and clustering result");
+            let bar = indicatif::ProgressBar::new(total_keys as u64);
+            bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
+                "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
+            ));
+            groups.into_iter()
                 .zip(counting_vec)
                 .map(|(cluster, count)| {
                     clustering_writer.write_u32_le(cluster);
@@ -399,7 +419,7 @@ fn main() {
 
     // balance writer
     let (balance_sender, balance_receiver) =
-        mpsc::channel::<(Arc<Mutex<FxHashMap<AddressKey, i64>>>, Date<Utc>)>();
+        channel::unbounded::<(Arc<Mutex<FxHashMap<AddressKey, i64>>>, Date<Utc>)>();
 
     // start balance writer thread
     let balance_writer = thread::spawn(move || {
@@ -558,18 +578,5 @@ mod test {
         assert_eq!(trailing_zero(9000000000000000000), 18u8);
         assert_eq!(trailing_zero(0), 0u8);
         assert_eq!(trailing_zero(1200), 2u8);
-    }
-
-    #[test]
-    fn test2() {
-        let bar = indicatif::ProgressBar::new(877499259);
-        bar.set_style(ProgressStyle::default_bar().progress_chars("=>-").template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
-        ));
-        (0u32..877499259u32)
-            .into_par_iter_sync(move |i| Ok(i))
-            .filter(|i| i % 1000 == 0)
-            .for_each(|_| bar.inc(1000));
-        bar.finish();
     }
 }
