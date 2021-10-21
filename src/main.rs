@@ -1,4 +1,4 @@
-use ahash::AHasher;
+use ahash::{AHasher, RandomState};
 use bitcoin_explorer::{Address, BitcoinDB, SBlock, SConnectedBlock};
 use chrono::{Date, NaiveDateTime, Utc};
 use crossbeam::channel;
@@ -17,7 +17,7 @@ use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
 use std::fs;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -93,6 +93,8 @@ struct AddressCacheRead {
     // (index, count)
     address_index: Arc<HashedMap<u128, (AddressKey, u32)>>,
     union_find: Arc<Mutex<InPlaceUnificationTable<AddressKey>>>,
+    random_state_1: RandomState,
+    random_state_2: RandomState,
 }
 
 impl AddressCacheRead {
@@ -101,6 +103,8 @@ impl AddressCacheRead {
         AddressCacheRead {
             address_index: Arc::new(get_inner_lock.unwrap().into_inner().unwrap()),
             union_find: cache.union_find,
+            random_state_1: cache.random_state_1,
+            random_state_2: cache.random_state_2,
         }
     }
 
@@ -119,7 +123,7 @@ impl AddressCacheRead {
     pub fn assert_get_address_index(&self, addresses: Box<[Address]>) -> Option<(AddressKey, u32)> {
         if let Some(address_string) = AddressCache::addresses_to_string(&addresses) {
             Some(
-                self.get_address_index(AddressCache::hash(&address_string))
+                self.get_address_index(self.hash(&address_string))
                     .expect("inputs must exist in UTXO"),
             )
         } else {
@@ -136,6 +140,13 @@ impl AddressCacheRead {
     fn get_address_index(&self, hash: u128) -> Option<(AddressKey, u32)> {
         // sync
         self.address_index.get(&hash).map(|x| x.to_owned())
+    }
+
+    #[inline]
+    fn hash(&self, address_string: &str) -> u128 {
+        let mut hasher_0 = (&self.random_state_1).build_hasher();
+        let mut hasher_1 = (&self.random_state_2).build_hasher();
+        hash_string_with_hasher(&mut hasher_0, &mut hasher_1, address_string)
     }
 
     fn dump(self, path: &Path) {
@@ -201,6 +212,8 @@ struct AddressCache {
     address_index: Arc<Mutex<HashedMap<u128, (AddressKey, u32)>>>,
     union_find: Arc<Mutex<InPlaceUnificationTable<AddressKey>>>,
     permanent_store: Arc<DB>,
+    random_state_1: RandomState,
+    random_state_2: RandomState,
 }
 
 impl AddressCache {
@@ -237,13 +250,15 @@ impl AddressCache {
             ))),
             union_find,
             permanent_store,
+            random_state_1: RandomState::with_seed(12345),
+            random_state_2: RandomState::with_seed(54321),
         }
     }
 
     #[inline]
     pub fn add_new_address(&self, addresses: Box<[Address]>) {
         if let Some(addresses_string) = Self::addresses_to_string(&addresses) {
-            let address_hash = Self::hash(&addresses_string);
+            let address_hash = self.hash(&addresses_string);
             let mut is_new_address = false;
             // cache lock scope
             let write_opt = {
@@ -296,15 +311,20 @@ impl AddressCache {
     }
 
     #[inline]
-    fn hash(address_string: &str) -> u128 {
-        let mut hasher_0 = AHasher::new_with_keys(54321, 12345);
-        let mut hasher_1 = AHasher::new_with_keys(12345, 54321);
-        address_string.hash(&mut hasher_0);
-        address_string.hash(&mut hasher_1);
-        let hash_0 = (hasher_0.finish() as u128) << 64;
-        let hash_1 = hasher_1.finish() as u128;
-        hash_0 ^ hash_1
+    fn hash(&self, address_string: &str) -> u128 {
+        let mut hasher_0 = (&self.random_state_1).build_hasher();
+        let mut hasher_1 = (&self.random_state_2).build_hasher();
+        hash_string_with_hasher(&mut hasher_0, &mut hasher_1, address_string)
     }
+}
+
+#[inline(always)]
+fn hash_string_with_hasher(hasher_0: &mut AHasher, hasher_1: &mut AHasher, string: &str) -> u128 {
+    string.hash(hasher_0);
+    string.hash(hasher_1);
+    let hash_0 = (hasher_0.finish() as u128) << 64;
+    let hash_1 = hasher_1.finish() as u128;
+    hash_0 ^ hash_1
 }
 
 ///
