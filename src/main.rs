@@ -12,7 +12,7 @@ use num_cpus;
 use par_iter_sync::*;
 use rayon::prelude::*;
 use rocksdb::{Options, PlainTableFactoryOptions, SliceTransform, WriteOptions, DB};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use simple_logger::SimpleLogger;
 use std::collections::hash_map::Entry;
 use std::fs;
@@ -470,6 +470,10 @@ fn main() {
 
                 // H1: common spending, all input addresses are connected
                 address_cache.connect_addresses_index(&in_addresses);
+                let in_addresses: FxHashSet<AddressKey> = in_addresses
+                    .into_iter()
+                    .map(|(address, _)| address)
+                    .collect();
 
                 // H2: OTX
                 let mut otx_address: Option<AddressKey> = None;
@@ -495,12 +499,15 @@ fn main() {
                     }
                 } else if tx.output.len() > 2 {
                     // H2.4 H2.1 check which index appears only once
-                    let only_once_index: Vec<AddressKey> = tx
+                    let all_out_address_index: Vec<Option<(AddressKey, u32)>> = tx
                         .output
                         .iter()
                         .map(|o| address_cache.assert_get_address_index(o.addresses.clone()))
+                        .collect();
+                    let only_once_index: Vec<AddressKey> = all_out_address_index
+                        .iter()
                         .filter_map(|x| {
-                            if let Some((index, count)) = x {
+                            if let Some((index, count)) = *x {
                                 if count == 1 {
                                     Some(index)
                                 } else {
@@ -513,13 +520,43 @@ fn main() {
                         .collect();
                     // only one address appears only once
                     if only_once_index.len() == 1 {
-                        otx_address = Some(*only_once_index.first().unwrap())
+                        // check that other addresses are not self change
+                        let other_index: Vec<AddressKey> = all_out_address_index
+                            .iter()
+                            .filter_map(|x| {
+                                if let Some((index, count)) = *x {
+                                    if count > 1 {
+                                        Some(index)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let mut any_self_change = false;
+                        for other in other_index.iter() {
+                            if in_addresses.contains(other) {
+                                any_self_change = true;
+                                break;
+                            }
+                        }
+                        // H2.3: No self-change
+                        if !any_self_change {
+                            otx_address = Some(*only_once_index.first().unwrap())
+                        }
                     }
                 }
                 if let Some(index) = otx_address {
-                    // H2.2 if not coinbase, H2.3 can be ignored
+                    // H2.2 if not coinbase
                     if in_addresses.len() > 0 {
-                        let (first_in_index, _) = *in_addresses.first().unwrap();
+                        let first_in_index = *in_addresses
+                            .into_iter()
+                            .take(1)
+                            .collect::<Vec<AddressKey>>()
+                            .first()
+                            .unwrap();
                         address_cache.union(&first_in_index, &index)
                     }
                 }
