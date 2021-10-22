@@ -11,7 +11,6 @@ use rocksdb::{Options, PlainTableFactoryOptions, SliceTransform, WriteOptions, D
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -176,31 +175,12 @@ impl AddressCacheRead {
     }
 }
 
-pub struct BulkWriteDB(DB);
-
-impl Deref for BulkWriteDB {
-    type Target = DB;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Drop for BulkWriteDB {
-    // do a full compaction before dropping
-    fn drop(&mut self) {
-        info!("start compacting Address rocksDB");
-        self.compact_range::<&[u8], &[u8]>(None, None);
-        info!("finished compacting Address rocksDB");
-    }
-}
-
 #[derive(Clone)]
 pub struct AddressCache {
     // (index, count)
     address_index: Arc<Mutex<HashedMap<u128, (AddressKey, u32)>>>,
     union_find: Arc<Mutex<InPlaceUnificationTable<AddressKey>>>,
-    permanent_store: Arc<BulkWriteDB>,
+    permanent_store: Arc<DB>,
     random_state_1: RandomState,
     random_state_2: RandomState,
 }
@@ -222,14 +202,12 @@ impl AddressCache {
                 hash_table_ratio: 0.75,
                 index_sparseness: 16,
             });
-            options.prepare_for_bulk_load();
-            let db = match DB::open(&options, out_dir) {
+            Arc::new(match DB::open(&options, out_dir) {
                 Ok(db) => db,
                 Err(e) => {
                     panic!("failed to create temp rocksDB for UTXO: {}", e);
                 }
-            };
-            Arc::new(BulkWriteDB(db))
+            })
         };
         let mut union_table = InPlaceUnificationTable::new();
         union_table.reserve(900_000_000);
