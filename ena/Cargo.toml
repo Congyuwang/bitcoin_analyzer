@@ -20,6 +20,8 @@ readme = "README.md"
 keywords = ["unification", "union-find"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/rust-lang-nursery/ena"
+edition = "2021"
+
 [dependencies.dogged]
 version = "0.2.0"
 optional = true

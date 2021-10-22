@@ -35,8 +35,8 @@ use std::fmt::Debug;
 use std::marker;
 use std::ops::Range;
 
-use snapshot_vec::{self as sv, UndoLog};
-use undo_log::{UndoLogs, VecLog};
+use crate::snapshot_vec::{self as sv, UndoLog};
+use crate::undo_log::{UndoLogs, VecLog};
 
 mod backing_vec;
 pub use self::backing_vec::{
@@ -318,7 +318,7 @@ impl<S: UnificationStoreMut> UnificationTable<S> {
     /// Creates a fresh key with the given value.
     pub fn new_key(&mut self, value: S::Value) -> S::Key {
         let len = self.values.len();
-        let key: S::Key = UnifyKey::from_index(len as u32);
+        let key: S::Key = UnifyKey::from_index(len.try_into().unwrap());
         self.values.push(VarValue::new_var(key, value));
         debug!("{}: created new key: {:?}", S::tag(), key);
         key

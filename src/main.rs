@@ -268,7 +268,6 @@ impl AddressCache {
             };
             let index = {
                 let mut cache = self.address_index.lock().unwrap();
-                let new_index = AddressKey(cache.len() as u32);
                 let entry = cache.entry(address_hash);
                 let (index, _) = match entry {
                     Entry::Occupied(mut o) => {
@@ -278,7 +277,8 @@ impl AddressCache {
                     }
                     Entry::Vacant(v) => {
                         is_new_address = true;
-                        *v.insert((new_index, 1))
+                        let new_key = self.union_find.lock().unwrap().new_key(());
+                        *v.insert((new_key, 1))
                     }
                 };
                 index
@@ -291,7 +291,6 @@ impl AddressCache {
                         &write_opt,
                     )
                     .expect("fail to write to rocksdb");
-                self.union_find.lock().unwrap().new_key(());
             }
         }
     }
@@ -469,7 +468,9 @@ fn main() {
                     .collect();
 
                 // H1: common spending, all input addresses are connected
-                address_cache.connect_addresses_index(&in_addresses);
+                if tx.output.len() == 1 {
+                    address_cache.connect_addresses_index(&in_addresses);
+                }
                 let in_addresses: FxHashSet<AddressKey> = in_addresses
                     .into_iter()
                     .map(|(address, _)| address)
@@ -486,9 +487,9 @@ fn main() {
 
                     let mut candidate = None;
                     // first has more decimal places, fewer zeros
-                    if trailing_zero(first.value) + 3 <= trailing_zero(last.value) {
+                    if trailing_zero(first.value) + 4 <= trailing_zero(last.value) {
                         candidate = first_index;
-                    } else if trailing_zero(last.value) + 3 <= trailing_zero(first.value) {
+                    } else if trailing_zero(last.value) + 4 <= trailing_zero(first.value) {
                         candidate = last_index;
                     }
                     if let Some((index, count)) = candidate {
