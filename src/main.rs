@@ -185,10 +185,10 @@ impl AddressCacheRead {
                 "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>10}/{len:10} ({per_sec}, {eta})",
             ));
             (0u32..total_keys)
-                .into_par_iter_sync(move |i| Ok(union_find.get_find(i).index()))
+                .into_par_iter_sync(move |i| Ok(union_find.get_find(i).index().to_le_bytes()))
                 .zip(counting_vec)
                 .map(|(cluster, count)| {
-                    clustering_writer.write_u32_le(cluster);
+                    clustering_writer.write_all(&cluster[..]);
                     counting_writer.write_u32_le(count);
                     ()
                 })
@@ -471,6 +471,8 @@ fn main() {
                 if tx.output.len() == 1 {
                     address_cache.connect_addresses_index(&in_addresses);
                 }
+
+                // convert to hashmap to check self-change
                 let in_addresses: FxHashSet<AddressKey> = in_addresses
                     .into_iter()
                     .map(|(address, _)| address)
@@ -522,23 +524,9 @@ fn main() {
                     // only one address appears only once
                     if only_once_index.len() == 1 {
                         // check that other addresses are not self change
-                        let other_index: Vec<AddressKey> = all_out_address_index
-                            .iter()
-                            .filter_map(|x| {
-                                if let Some((index, count)) = *x {
-                                    if count > 1 {
-                                        Some(index)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
                         let mut any_self_change = false;
-                        for other in other_index.iter() {
-                            if in_addresses.contains(other) {
+                        for (other, _) in all_out_address_index.iter().filter_map(|x| *x) {
+                            if in_addresses.contains(&other) {
                                 any_self_change = true;
                                 break;
                             }
@@ -549,16 +537,12 @@ fn main() {
                         }
                     }
                 }
-                if let Some(index) = otx_address {
+                if let Some(otx_index) = otx_address {
                     // H2.2 if not coinbase
                     if in_addresses.len() > 0 {
-                        let first_in_index = *in_addresses
-                            .into_iter()
-                            .take(1)
-                            .collect::<Vec<AddressKey>>()
-                            .first()
-                            .unwrap();
-                        address_cache.union(&first_in_index, &index)
+                        for in_add in in_addresses.iter() {
+                            address_cache.union(in_add, &otx_index)
+                        }
                     }
                 }
             }
