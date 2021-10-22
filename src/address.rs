@@ -132,6 +132,8 @@ impl AddressCacheRead {
                         counting_vec[index.index() as usize] = count
                     }
                 });
+            // convert to Arc to prevent unintended cloning
+            let counting_vec = Arc::new(counting_vec);
 
             info!("start dumping address counting and clustering result");
             let bar = ProgressBar::new(total_keys as u64);
