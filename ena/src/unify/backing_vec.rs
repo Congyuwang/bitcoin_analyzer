@@ -1,6 +1,6 @@
+use crate::snapshot_vec as sv;
 #[cfg(feature = "persistent")]
 use dogged::DVec;
-use crate::snapshot_vec as sv;
 use std::marker::PhantomData;
 use std::ops::{self, Range};
 
