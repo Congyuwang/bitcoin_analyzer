@@ -3,7 +3,8 @@ use indicatif::ProgressStyle;
 use log::{info, warn};
 use num_cpus;
 use rocksdb::{
-    Direction, IteratorMode, Options, PlainTableFactoryOptions, ReadOptions, SliceTransform, DB,
+    DBIteratorWithThreadMode, Direction, IteratorMode, Options, PlainTableFactoryOptions,
+    ReadOptions, SliceTransform, DB,
 };
 use simple_logger::SimpleLogger;
 use std::fs::File;
@@ -100,27 +101,7 @@ fn main() {
                             continue;
                         }
                         for i in start..end {
-                            match db.get_pinned(&i.to_be_bytes()[..]) {
-                                Ok(optional) => {
-                                    match optional {
-                                        None => {
-                                            warn!("range exceeded");
-                                            break;
-                                        }
-                                        Some(s) => match str::from_utf8(s.as_ref()) {
-                                            Ok(s) => println!("{}", s),
-                                            Err(e) => {
-                                                warn!("address of index {} cannot be utf-8 decoded: {}", i, e);
-                                                break;
-                                            }
-                                        },
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("failed to query DB: {}", e);
-                                    break;
-                                }
-                            };
+                            get_pinned(&db, i, |s| println!("{}", s));
                         }
                     } else {
                         warn!("`start` must be smaller than `end`");
@@ -182,44 +163,49 @@ fn main() {
                             101..=10000 => 10,
                             _ => 100,
                         };
-                        let iterator = {
-                            let mut opt = ReadOptions::default();
-                            opt.set_pin_data(true);
-                            opt.set_verify_checksums(false);
-                            opt.set_iterate_lower_bound(&start.to_be_bytes()[..]);
-                            opt.set_ignore_range_deletions(true);
-                            opt.set_iterate_upper_bound(&end.to_be_bytes()[..]);
-                            db.iterator_opt(
-                                IteratorMode::From(&start.to_be_bytes()[..], Direction::Forward),
-                                opt,
-                            )
-                        };
-                        for (i, (key, address)) in (start..end).zip(iterator) {
-                            let key = u32::from_be_bytes(key.as_ref().try_into().unwrap());
-                            if key != i {
-                                warn!("address index {} missing, corrupted data.", i);
+
+                        let mut i = start;
+                        loop {
+                            // break if end is reached
+                            if i == end {
                                 break;
                             }
-                            match str::from_utf8(address.as_ref()) {
-                                Ok(address) => match write!(address_csv, "{},{}\n", key, address) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        warn!("writing to csv failed: {}", e);
-                                        break;
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!(
-                                        "address of index {} cannot be utf-8 decoded: {}",
-                                        key, e
-                                    );
+
+                            // instantiate an iterator from i to end
+                            for (key, address) in create_iterator(&db, i, end) {
+                                let key = u32::from_be_bytes(key.as_ref().try_into().unwrap());
+                                if key != i {
+                                    warn!("address index {} missing, corrupted data.", i);
                                     break;
                                 }
+                                match str::from_utf8(address.as_ref()) {
+                                    Ok(address) => {
+                                        write!(address_csv, "{},{}\n", key, address).unwrap();
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "address of index {} cannot be utf-8 decoded: {}",
+                                            key, e
+                                        );
+                                        break;
+                                    }
+                                }
+                                if progress % update_freq == 0 {
+                                    bar.set_position(progress);
+                                }
+                                progress += 1;
+                                i += 1;
                             }
-                            if progress % update_freq == 0 {
-                                bar.set_position(progress);
+
+                            // if the iterator fails, fall back to get() for one address key
+                            if i < end {
+                                get_pinned(&db, i, |s| write!(address_csv, "{},{}\n", i, s).unwrap());
+                                if progress % update_freq == 0 {
+                                    bar.set_position(progress);
+                                }
+                                progress += 1;
+                                i += 1;
                             }
-                            progress += 1;
                         }
                         bar.finish();
                     } else {
@@ -234,25 +220,39 @@ fn main() {
         }
 
         match query.trim().parse::<u32>() {
-            Ok(address_key) => {
-                match db.get_pinned(&address_key.to_be_bytes()[..]) {
-                    Ok(optional) => match optional {
-                        None => println!("NOT FOUND (OUT OF RANGE)"),
-                        Some(s) => match str::from_utf8(s.as_ref()) {
-                            Ok(s) => println!("{}", s),
-                            Err(e) => {
-                                warn!("address of index {} cannot be utf-8 decoded: {}", address_key, e);
-                                break;
-                            }
-                        },
-                    },
-                    Err(e) => warn!("failed to query DB: {}", e),
-                };
-            }
+            Ok(address_key) => get_pinned(&db, address_key, |s| println!("{}", s)),
             Err(_) => {
                 warn!("Unknown Command");
                 continue;
             }
         };
     }
+}
+
+fn get_pinned<F>(db: &DB, i: u32, mut call_back: F)
+where F: FnMut(&str) -> ()
+{
+    match db.get_pinned(&i.to_be_bytes()[..]) {
+        Ok(optional) => match optional {
+            None => warn!("range exceeded"),
+            Some(s) => match str::from_utf8(s.as_ref()) {
+                Ok(s) => call_back(s),
+                Err(e) => warn!("address of index {} cannot be utf-8 decoded: {}", i, e),
+            },
+        },
+        Err(e) => warn!("failed to query DB: {}", e),
+    }
+}
+
+fn create_iterator(db: &DB, start: u32, stop: u32) -> DBIteratorWithThreadMode<DB> {
+    let mut opt = ReadOptions::default();
+    opt.set_pin_data(true);
+    opt.set_verify_checksums(false);
+    opt.set_iterate_lower_bound(&start.to_be_bytes()[..]);
+    opt.set_ignore_range_deletions(true);
+    opt.set_iterate_upper_bound(&stop.to_be_bytes()[..]);
+    db.iterator_opt(
+        IteratorMode::From(&start.to_be_bytes()[..], Direction::Forward),
+        opt,
+    )
 }
