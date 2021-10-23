@@ -107,8 +107,8 @@ impl AddressCacheRead {
 
     pub fn dump(self, path: &Path) {
         let write_handle = {
-            let clustering_path = path.to_path_buf().join("clustering.u32little");
-            let counting_path = path.to_path_buf().join("counting.u32little");
+            let clustering_path = path.to_path_buf().join("clustering.u32big");
+            let counting_path = path.to_path_buf().join("counting.u32big");
             let mut clustering_writer = AsyncBufWriter::new(File::create(clustering_path).unwrap());
             let mut counting_writer = AsyncBufWriter::new(File::create(counting_path).unwrap());
             let union_find = unwrap_mutex(self.union_find);
@@ -145,13 +145,13 @@ impl AddressCacheRead {
                     let cluster = union_find
                         .get_find(i)
                         .index()
-                        .to_le_bytes()
+                        .to_be_bytes()
                         .to_vec()
                         .into_boxed_slice();
                     let count = counting_vec
                         .get(i as usize)
                         .unwrap()
-                        .to_le_bytes()
+                        .to_be_bytes()
                         .to_vec()
                         .into_boxed_slice();
                     Ok((cluster, count))
@@ -255,7 +255,7 @@ impl AddressCache {
             if is_new_address {
                 self.permanent_store
                     .put_opt(
-                        &index.index().to_le_bytes()[..],
+                        &index.index().to_be_bytes()[..],
                         addresses_string,
                         &write_opt,
                     )

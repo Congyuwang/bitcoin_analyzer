@@ -1,12 +1,15 @@
+use indicatif;
+use indicatif::ProgressStyle;
 use log::{info, warn};
 use num_cpus;
-use rocksdb::{Options, PlainTableFactoryOptions, SliceTransform, DB};
+use rocksdb::{
+    Direction, IteratorMode, Options, PlainTableFactoryOptions, ReadOptions, SliceTransform, DB,
+};
 use simple_logger::SimpleLogger;
 use std::fs::File;
 use std::io::{stdin, stdout, BufWriter, Write};
 use std::path::Path;
-use indicatif;
-use indicatif::ProgressStyle;
+use std::str;
 
 fn main() {
     SimpleLogger::new().init().unwrap();
@@ -17,7 +20,9 @@ fn main() {
         stdout().flush().unwrap();
         let mut db_path = String::new();
         stdin().read_line(&mut db_path).unwrap();
-        if db_path.trim() == "exit" { return () }
+        if db_path.trim() == "exit" {
+            return ();
+        }
         let db_path = Path::new(db_path.trim());
         if !db_path.exists() {
             warn!("bitcoin path: {} not found", db_path.display());
@@ -90,15 +95,27 @@ fn main() {
             match (start.parse::<u32>(), end.parse::<u32>()) {
                 (Ok(start), Ok(end)) => {
                     if start < end {
+                        if end - start > 10000 {
+                            warn!("use `export` command for more than 10000 output");
+                            continue;
+                        }
                         for i in start..end {
-                            match db.get(&i.to_le_bytes()[..]) {
-                                Ok(optional) => match optional {
-                                    None => {
-                                        warn!("range exceeded");
-                                        break;
+                            match db.get_pinned(&i.to_be_bytes()[..]) {
+                                Ok(optional) => {
+                                    match optional {
+                                        None => {
+                                            warn!("range exceeded");
+                                            break;
+                                        }
+                                        Some(s) => match str::from_utf8(s.as_ref()) {
+                                            Ok(s) => println!("{}", s),
+                                            Err(e) => {
+                                                warn!("address of index {} cannot be utf-8 decoded: {}", i, e);
+                                                break;
+                                            }
+                                        },
                                     }
-                                    Some(s) => println!("{}", String::from_utf8(s).unwrap()),
-                                },
+                                }
                                 Err(e) => {
                                     warn!("failed to query DB: {}", e);
                                     break;
@@ -165,33 +182,40 @@ fn main() {
                             101..=10000 => 10,
                             _ => 100,
                         };
-                        for i in start..end {
-                            match db.get(&i.to_le_bytes()[..]) {
-                                Ok(optional) => match optional {
-                                    None => {
-                                        warn!("range exceeded");
+                        let iterator = {
+                            let mut opt = ReadOptions::default();
+                            opt.set_pin_data(true);
+                            opt.set_verify_checksums(false);
+                            opt.set_iterate_lower_bound(&start.to_be_bytes()[..]);
+                            opt.set_ignore_range_deletions(true);
+                            opt.set_iterate_upper_bound(&end.to_be_bytes()[..]);
+                            db.iterator_opt(
+                                IteratorMode::From(&start.to_be_bytes()[..], Direction::Forward),
+                                opt,
+                            )
+                        };
+                        for (i, (key, address)) in (start..end).zip(iterator) {
+                            let key = u32::from_be_bytes(key.as_ref().try_into().unwrap());
+                            if key != i {
+                                warn!("address index {} missing, corrupted data.", i);
+                                break;
+                            }
+                            match str::from_utf8(address.as_ref()) {
+                                Ok(address) => match write!(address_csv, "{},{}\n", key, address) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!("writing to csv failed: {}", e);
                                         break;
-                                    }
-                                    Some(s) => {
-                                        match write!(
-                                            address_csv,
-                                            "{},{}\n",
-                                            i,
-                                            String::from_utf8(s).unwrap()
-                                        ) {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                warn!("writing to csv failed: {}", e);
-                                                break;
-                                            }
-                                        }
                                     }
                                 },
                                 Err(e) => {
-                                    warn!("failed to query DB: {}", e);
+                                    warn!(
+                                        "address of index {} cannot be utf-8 decoded: {}",
+                                        key, e
+                                    );
                                     break;
                                 }
-                            };
+                            }
                             if progress % update_freq == 0 {
                                 bar.set_position(progress);
                             }
@@ -211,16 +235,22 @@ fn main() {
 
         match query.trim().parse::<u32>() {
             Ok(address_key) => {
-                match db.get(&address_key.to_le_bytes()[..]) {
+                match db.get_pinned(&address_key.to_be_bytes()[..]) {
                     Ok(optional) => match optional {
                         None => println!("NOT FOUND (OUT OF RANGE)"),
-                        Some(s) => println!("{}", String::from_utf8(s).unwrap()),
+                        Some(s) => match str::from_utf8(s.as_ref()) {
+                            Ok(s) => println!("{}", s),
+                            Err(e) => {
+                                warn!("address of index {} cannot be utf-8 decoded: {}", address_key, e);
+                                break;
+                            }
+                        },
                     },
                     Err(e) => warn!("failed to query DB: {}", e),
                 };
             }
-            Err(e) => {
-                warn!("Not a valid u32 integer: {}", e);
+            Err(_) => {
+                warn!("Unknown Command");
                 continue;
             }
         };

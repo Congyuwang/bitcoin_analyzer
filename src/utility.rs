@@ -1,6 +1,6 @@
-use std::fs::File;
 use crossbeam::channel;
 use crossbeam::channel::Sender;
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
